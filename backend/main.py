@@ -79,7 +79,10 @@ class Source(BaseModel):
 
 class SourceChainItem(BaseModel):
     source: str
-    date: str
+    url: str = ""
+    date: str = ""
+    platform: str = ""
+    author: str = ""
 
 class SourceAnalysis(BaseModel):
     source_status: str = "uncertain"
@@ -1211,77 +1214,177 @@ def parse_datetime_value(value: str) -> str:
         return ""
     return str(value).strip()
 
-def build_source_chain(source_items: List[dict], current_source_label: str, current_source_date: str) -> dict:
-    chain = []
-    earliest = None
+def build_source_chain(
+    source_items: List[dict],
+    current_source_label: str,
+    current_source_date: str,
+) -> dict:
+    """
+    Birincil kaynak adaylarını değerlendirir.
+
+    Amaç:
+    - Platform adını değil, mümkünse doğrudan paylaşımı göstermek
+    - Kaynağın URL'sini frontend'e göndermek
+    - Resmi/kurumsal kaynakları önceliklendirmek
+    - Olasılığı kaynak sayısından uydurmamak
+    """
+
+    candidates = []
+
     for item in source_items:
-        label = item.get("source", "")
-        date = item.get("date", "")
-        chain.append({"source": label, "date": date})
-        if date and (earliest is None or date < earliest.get("date", "")):
-            earliest = {"source": label, "date": date}
+        url = str(item.get("url", "") or "").strip()
+        title = str(item.get("source", "") or "").strip()
+        date = str(item.get("date", "") or "").strip()
+        platform = str(item.get("platform", "") or "").strip()
 
-    if current_source_date:
-        chain.append({"source": current_source_label, "date": current_source_date})
-        if earliest is None or current_source_date < earliest.get("date", ""):
-            earliest = {"source": current_source_label, "date": current_source_date}
+        if not url:
+            continue
 
-    if earliest is None:
-        earliest = {"source": "", "date": ""}
+        score = 0
 
-    source_probability = 0
-    source_status = "uncertain"
-    likely_original_source = earliest["source"] or ""
-    if chain:
-        source_probability = min(92, 55 + max(0, len(chain) - 1) * 8)
-        if likely_original_source and likely_original_source != current_source_label:
-            source_status = "derived"
-        elif current_source_label:
-            source_status = "original"
+        lowered_title = title.lower()
+        lowered_url = url.lower()
 
-    reasoning = "Bulunabilen en eski kaynaklar kronolojik olarak sıralandı; kesin ilk kaynak iddiası yapılmadı."
+        # Resmi kurum / resmi site sinyalleri
+        official_domains = (
+            ".gov.tr",
+            ".gov",
+            ".bel.tr",
+            ".edu.tr",
+            ".mil.tr",
+        )
+
+        if any(domain in lowered_url for domain in official_domains):
+            score += 45
+
+        # Sosyal medya paylaşımı olması önemli.
+        # Burada amaç platform adını değil doğrudan paylaşım URL'sini
+        # kaynak olarak göstermek.
+        social_domains = (
+            "x.com",
+            "twitter.com",
+            "bsky.app",
+            "threads.net",
+            "facebook.com",
+            "instagram.com",
+            "tiktok.com",
+            "nsosyal.com",
+        )
+
+        if any(domain in lowered_url for domain in social_domains):
+            score += 30
+
+        # Başlığın sadece platform adı olması kötü bir sinyal.
+        generic_platform_titles = {
+            "x",
+            "twitter",
+            "bluesky",
+            "facebook",
+            "instagram",
+            "tiktok",
+            "nsosyal",
+        }
+
+        if lowered_title in generic_platform_titles:
+            score -= 20
+
+        # Gerçek bir başlık varsa avantaj.
+        if len(title) >= 25:
+            score += 10
+
+        # Tarihi bulunan kaynak daha değerlidir.
+        if date:
+            score += 5
+
+        candidates.append({
+            "source": title or "Birincil kaynak adayı",
+            "url": url,
+            "date": date,
+            "platform": platform,
+            "score": max(0, min(100, score)),
+        })
+
+    # Mevcut gönderiyi de aday olarak ekle
+    if current_source_label:
+        current_url = current_source_label if current_source_label.startswith("http") else ""
+
+        if current_url:
+            candidates.append({
+                "source": "Mevcut paylaşım",
+                "url": current_url,
+                "date": current_source_date or "",
+                "platform": get_domain(current_url),
+                "score": 20,
+            })
+
+    # En yüksek puanlı aday birincil kaynak adayıdır.
+    candidates.sort(
+        key=lambda item: (
+            item["score"],
+            bool(item["date"]),
+        ),
+        reverse=True,
+    )
+
+    if not candidates:
+        return {
+            "source_status": "uncertain",
+            "source_probability": 0,
+            "likely_original_source": "",
+            "earliest_found_source": "",
+            "earliest_found_date": "",
+            "current_source_date": current_source_date or "",
+            "source_chain": [],
+            "reasoning": "Birincil kaynak adayı bulunamadı.",
+        }
+
+    primary = candidates[0]
+
+    # Gerçek bir "kanıt gücü" skoru.
+    # Kaynak sayısından rastgele %92 üretmiyoruz.
+    probability = primary["score"]
+
+    if primary["score"] >= 75:
+        status = "strong_candidate"
+        reasoning = (
+            "Resmi veya doğrudan paylaşım niteliği taşıyan güçlü bir "
+            "birincil kaynak adayı bulundu."
+        )
+    elif primary["score"] >= 50:
+        status = "candidate"
+        reasoning = (
+            "Birincil kaynak olabilecek bir aday bulundu; ancak kesin "
+            "ilk paylaşım olduğu doğrulanamadı."
+        )
+    else:
+        status = "uncertain"
+        reasoning = (
+            "Birincil kaynak için yeterli kanıt bulunamadı."
+        )
+
+    chain = [
+        {
+            "source": item["source"],
+            "url": item["url"],
+            "date": item["date"],
+            "platform": item["platform"],
+        }
+        for item in candidates
+    ]
+
     return {
-        "source_status": source_status,
-        "source_probability": source_probability,
-        "likely_original_source": likely_original_source,
-        "earliest_found_source": earliest["source"] or "",
-        "earliest_found_date": earliest["date"] or "",
+        "source_status": status,
+        "source_probability": probability,
+        "likely_original_source": primary["source"],
+        "earliest_found_source": primary["source"],
+        "earliest_found_date": primary["date"],
         "current_source_date": current_source_date or "",
         "source_chain": chain,
         "reasoning": reasoning,
     }
 
-def analyze_source_chain(title: str, description: str, body: str, current_url: str, current_date: str = "", current_site: str = "") -> dict:
-    query = extract_claims_for_source_analysis(title, description, body)
-    if not query:
-        return SourceAnalysis().model_dump()
-
-    research = search_with_tavily(query, max_results=5)
-    chain_items = []
-    current_label = current_site or get_domain(current_url) or "Kullanıcının verdiği URL"
-    current_date_value = parse_datetime_value(current_date)
-
-    for item in research:
-        item_url = item.get("url", "")
-        item_title = item.get("title", "") or get_domain(item_url) or "Kaynak"
-        published = ""
-        try:
-            html = fetch_webpage(item_url)
-            if html:
-                meta = extract_page_metadata(html, item_url)
-                published = parse_datetime_value(meta.get("published_time", ""))
-        except Exception:
-            published = ""
-        chain_items.append({
-            "source": item_title,
-            "date": published or "",
-        })
-
-    built = build_source_chain(chain_items, current_label, current_date_value)
-    return built
-
 # ============================================================
-# TAVILY + GROQ
+# TAVILY 
 # ============================================================
 
 def search_with_tavily(query: str, max_results: int = 5) -> List[dict]:
@@ -1632,6 +1735,111 @@ def register(request: RegisterRequest):
             "email": request.email.strip().lower(),
         },
     }
+
+def analyze_source_chain(
+    title: str,
+    description: str,
+    body: str,
+    current_url: str,
+    current_date: str = "",
+    current_site: str = "",
+) -> dict:
+
+    query = extract_claims_for_source_analysis(
+        title,
+        description,
+        body,
+    )
+
+    if not query:
+        return SourceAnalysis().model_dump()
+
+    research = search_with_tavily(query, max_results=10)
+
+    chain_items = []
+
+    for item in research:
+        item_url = str(item.get("url", "") or "").strip()
+
+        if not item_url:
+            continue
+
+        item_title = str(
+            item.get("title", "") or ""
+        ).strip()
+
+        published = ""
+        site_name = ""
+
+        try:
+            html = fetch_webpage(item_url)
+
+            if html:
+                meta = extract_page_metadata(
+                    html,
+                    item_url,
+                )
+
+                published = parse_datetime_value(
+                    meta.get("published_time", "")
+                )
+
+                site_name = str(
+                    meta.get("site_name", "")
+                    or ""
+                ).strip()
+
+                # Sayfanın gerçek başlığı varsa onu tercih et.
+                if meta.get("title"):
+                    item_title = str(
+                        meta.get("title")
+                    ).strip()
+
+        except Exception as exc:
+            print(
+                f"[TruthLens] Source metadata error: {exc}"
+            )
+
+        # Sadece platform adını başlık olarak bırakma.
+        if not item_title:
+            item_title = "Birincil kaynak adayı"
+
+        generic_platform_titles = {
+            "x",
+            "twitter",
+            "bluesky",
+            "facebook",
+            "instagram",
+            "tiktok",
+            "nsosyal",
+        }
+
+        if item_title.lower() in generic_platform_titles:
+            item_title = (
+                f"{site_name} paylaşımı"
+                if site_name
+                else "Doğrudan paylaşım"
+            )
+
+        chain_items.append({
+    "source": item_title,
+    "url": item_url,
+    "date": published or "",
+    "platform": site_name or get_domain(item_url),
+    "author": str(
+        meta.get("author", "")
+        if html
+        else ""
+    ).strip(),
+})
+
+    built = build_source_chain(
+        chain_items,
+        current_url,
+        current_date,
+    )
+
+    return built
 
 @app.post("/login")
 def login(request: LoginRequest):

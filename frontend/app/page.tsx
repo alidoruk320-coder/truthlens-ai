@@ -49,7 +49,12 @@ interface AnalysisResult {
     earliest_found_source?: string;
     earliest_found_date?: string;
     current_source_date?: string;
-    source_chain?: { source: string; date: string }[];
+    source_chain?: {
+  source: string;
+  url?: string;
+  date: string;
+  platform?: string;
+}[];
     reasoning?: string;
   };
 }
@@ -134,46 +139,7 @@ export default function Home() {
         (result.source_analysis.source_probability && result.source_analysis.source_probability > 0))
   );
 
-  useEffect(() => {
-    const storedToken = window.localStorage.getItem("truthlens_token");
-    if (storedToken) {
-      setToken(storedToken);
-      fetchCurrentUser(storedToken);
-    }
-  }, []);
 
-  useEffect(() => {
-    if (!feedOpen || feedSource !== "live") {
-      return;
-    }
-
-    const hasPendingAnalysis = demoFeed.some(
-      (post) => post.analysis_status !== "ready" && post.analysis_status !== "cached"
-    );
-
-    if (!hasPendingAnalysis) {
-      return;
-    }
-
-    const timer = window.setTimeout(async () => {
-      setFeedRefreshing(true);
-      try {
-        const liveResponse = await fetch(`${API_BASE_URL}/bluesky-feed?limit=${feedLimit}`);
-        const liveData = await liveResponse.json();
-        if (liveResponse.ok) {
-          setDemoFeed(Array.isArray(liveData?.posts) ? liveData.posts : []);
-          setDemoSummary(liveData?.summary || null);
-          setFeedSource(liveData?.provider === "bluesky" ? "live" : "demo");
-        }
-      } catch {
-        // Silent refresh: feed already visible.
-      } finally {
-        setFeedRefreshing(false);
-      }
-    }, 2500);
-
-    return () => window.clearTimeout(timer);
-  }, [feedOpen, feedSource, demoFeed, API_BASE_URL, feedLimit]);
 
   async function fetchCurrentUser(activeToken: string) {
     try {
@@ -1123,13 +1089,16 @@ export default function Home() {
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Muhtemel ilk kaynak</div>
-                      <div className="mt-2 text-lg font-semibold text-white">
-                        {result.source_analysis.likely_original_source || "Belirlenemedi"}
-                      </div>
+                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+  Muhtemel birincil paylaşım
+</div>
+
+<div className="mt-2 text-lg font-semibold text-white">
+  {result.source_analysis.likely_original_source || "Belirlenemedi"}
+</div>
                     </div>
                     <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Kaynak olma ihtimali</div>
+                     <div className="text-xs uppercase tracking-[0.2em] text-slate-500"> Birincil kaynak olma ihtimali </div>
                       <div className="mt-2 text-2xl font-bold text-emerald-300">
                         {result.source_analysis.source_probability ?? 0}%
                       </div>
@@ -1149,20 +1118,49 @@ export default function Home() {
                   </button>
 
                   {sourceChainOpen && (
-                    <div className="space-y-3">
-                      {(result.source_analysis.source_chain || []).length > 0 ? (
-                        result.source_analysis.source_chain!.map((item, index) => (
-                          <div key={`${item.source}-${index}`} className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-300">
-                            <div className="font-semibold text-white">{item.date || "Tarih bilinmiyor"} — {item.source}</div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-slate-500">
-                          Kaynak zinciri kesin olarak belirlenemedi.
-                        </div>
-                      )}
-                    </div>
-                  )}
+  <div className="space-y-3">
+    {(result.source_analysis.source_chain || []).length > 0 ? (
+      result.source_analysis.source_chain!.map((item, index) => (
+        <a
+          key={`${item.url || item.source}-${index}`}
+          href={item.url || "#"}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm transition hover:border-blue-500 hover:bg-slate-900"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="font-semibold text-blue-400">
+                {item.source || "Birincil kaynak adayı"}
+              </div>
+
+              <div className="mt-1 text-xs text-slate-500">
+                {item.date || "Tarih bilinmiyor"}
+                {item.platform
+                  ? ` · ${item.platform}`
+                  : ""}
+              </div>
+            </div>
+
+            <span className="shrink-0 text-xs text-blue-400">
+              Aç ↗
+            </span>
+          </div>
+
+          {item.url && (
+            <div className="mt-3 break-all text-xs text-slate-600">
+              {item.url}
+            </div>
+          )}
+        </a>
+      ))
+    ) : (
+      <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-slate-500">
+        Birincil kaynak adayı bulunamadı.
+      </div>
+    )}
+  </div>
+)}
                 </div>
               </Card>
             )}
