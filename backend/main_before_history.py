@@ -137,6 +137,7 @@ class ModerationDecision(BaseModel):
     aggregate_risk: int = 0
 
 class AnalysisResponse(BaseModel):
+    content_hash: str = ""
     score: int
     manipulation: int
     clickbait: int
@@ -2107,8 +2108,8 @@ def analyze_source_chain(
        - Haber sitesi, ikincil aktarıcı veya sadece alıntı yapan bir siteyse daha düşük skor ver.
        - Eğer yeterli kanıt veya tarih bilgisi yoksa veya kesin doğrulanamıyorsa orta/düşük bir olasılık skoru ver.
     5. Birincil kaynak olarak seçilen adayın detaylarını belirle:
-       - `likely_original_source`: Kurum veya kişi adı (örn. 'Millî Eğitim Bakanlığı', 'Ahmet Yılmaz'). Platform adını (X, Facebook, nsosyal vb.) doğrudan buraya yazma!
-       - `likely_original_author`: Paylaşımı yapan hesabın kullanıcı adı (örn. '@tcmeb', '@ahmetyilmaz'). Eğer kullanıcı adı yoksa boş bırak.
+       - `likely_original_source`: BİRİNCİL PAYLAŞIMI YAPAN HESABIN/KİŞİNİN GÖRÜNÜR ADI (örn. 'Millî Eğitim Bakanlığı', 'Ahmet Yılmaz'). Buraya yalnızca platform adı (X, Facebook, Instagram, NSosyal vb.) YAZMA; haber başlığını da kaynak adı olarak kullanma.
+       - `likely_original_author`: Varsa hesabın kullanıcı adı/handle'ı (örn. '@tcmeb', '@ahmetyilmaz').
        - `likely_original_url`: Bu paylaşımın veya resmi duyurunun tam URL'si (asla domain ana sayfasını vermeyin, tam path olsun, örn: 'https://x.com/tcmeb/status/123456').
        - `likely_original_date`: Paylaşım tarihi.
        - `likely_original_excerpt`: Paylaşım metninden veya duyurudan kısa bir alıntı.
@@ -2154,8 +2155,8 @@ def analyze_source_chain(
         idx = data_eval.get("primary_source_index", -1)
         if 0 <= idx < len(candidates):
             prim_c = candidates[idx]
-            likely_original_source = str(data_eval.get("likely_original_source") or prim_c.get("title") or "").strip()
             likely_original_author = str(data_eval.get("likely_original_author") or prim_c.get("author") or "").strip()
+            likely_original_source = str(data_eval.get("likely_original_source") or likely_original_author or prim_c.get("title") or "").strip()
             likely_original_url = str(data_eval.get("likely_original_url") or prim_c.get("url") or "").strip()
             likely_original_date = str(data_eval.get("likely_original_date") or prim_c.get("date") or "").strip()
             likely_original_excerpt = str(data_eval.get("likely_original_excerpt") or prim_c.get("excerpt") or "").strip()
@@ -2172,7 +2173,7 @@ def analyze_source_chain(
         for item in data_eval.get("evaluated_candidates", []):
             source_chain_items.append(
                 SourceChainItem(
-                    source=str(item.get("source") or "").strip(),
+                    source=(str(item.get("source") or "").strip() or str(item.get("author") or "").strip() or "Birincil kaynak adayı"),
                     url=str(item.get("url") or "").strip(),
                     date=str(item.get("date") or "").strip(),
                     platform=str(item.get("platform") or "").strip(),
@@ -2186,7 +2187,7 @@ def analyze_source_chain(
             for c in candidates:
                 source_chain_items.append(
                     SourceChainItem(
-                        source=c.get("title") or "Aday",
+                        source=c.get("author") or c.get("title") or "Aday",
                         url=c.get("url") or "",
                         date=c.get("date") or "",
                         platform=c.get("platform") or "",
@@ -2222,7 +2223,7 @@ def analyze_source_chain(
         for c in candidates:
             source_chain_items.append(
                 SourceChainItem(
-                    source=c.get("title") or "Aday",
+                    source=c.get("author") or c.get("title") or "Aday",
                     url=c.get("url") or "",
                     date=c.get("date") or "",
                     platform=c.get("platform") or "",
@@ -2419,14 +2420,15 @@ def analyze(request_body: AnalysisRequest, request: Request):
         if future_source:
             source_analysis = future_source.result()
 
+    content_hash = analysis_cache_key(analyzed_content, source_url)
     result = result.model_copy(update={
+        "content_hash": content_hash,
         "image_ai_probability": image_ai_probability,
         "image_is_ai": image_is_ai,
         "image_analysis_available": image_analysis_available,
         "source_analysis": source_analysis if isinstance(source_analysis, SourceAnalysis) else SourceAnalysis(**source_analysis),
     })
 
-    content_hash = analysis_cache_key(analyzed_content, source_url)
     log_moderation_decision(content_hash, result.moderation)
 
     user = get_current_user_from_request(request)

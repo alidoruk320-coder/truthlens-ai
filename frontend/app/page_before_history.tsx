@@ -28,24 +28,6 @@ interface ModerationResult {
   aggregate_risk: number;
 }
 
-interface VerificationBadge {
-  verified: boolean;
-  label: string;
-  short_label: string;
-  reasons?: string[];
-}
-
-interface ModerationHistoryItem {
-  content_hash: string;
-  action: "izin_ver" | "etiketle" | "gizle_ve_incele" | "kaldirma_oner";
-  aggregate_risk: number;
-  reason: string;
-  created_at: string;
-  appeal_status?: string | null;
-  appeal_reason?: string | null;
-  appeal_created_at?: string | null;
-}
-
 interface AnalysisResult {
   content_hash?: string;
   score: number;
@@ -63,7 +45,6 @@ interface AnalysisResult {
   social_risk_summary: string;
   toxicity?: ToxicityResult;
   moderation?: ModerationResult;
-  verification?: VerificationBadge;
   claims: string[];
   context: string;
   sources: Source[];
@@ -92,7 +73,6 @@ interface AnalysisResult {
       author?: string;
       is_likely_primary?: boolean;
       primary_probability?: number;
-      match_probability?: number;
     }[];
     reasoning?: string;
   };
@@ -138,8 +118,6 @@ interface FeedPost {
   image_ai_probability?: number;
   image_analysis_available?: boolean;
   image_analysis_reasoning?: string;
-  verification?: VerificationBadge;
-  verified_by_truthlens?: boolean;
 }
 
 type InputMode = "text" | "url";
@@ -170,9 +148,6 @@ export default function Home() {
   const [appealReason, setAppealReason] = useState("");
   const [appealSent, setAppealSent] = useState(false);
   const [appealSending, setAppealSending] = useState(false);
-  const [moderationHistory, setModerationHistory] = useState<ModerationHistoryItem[]>([]);
-  const [moderationHistoryLoading, setModerationHistoryLoading] = useState(false);
-  const [moderationHistoryError, setModerationHistoryError] = useState("");
   const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
   const safetyScore = result?.score ?? 0;
@@ -200,7 +175,6 @@ export default function Home() {
         const meData = await meResponse.json();
         setUser(meData.user);
         await fetchHistory(activeToken);
-        await fetchModerationHistory(activeToken);
       }
     } catch (err) {
       console.error("Kullanıcı profili alınamadı", err);
@@ -223,31 +197,6 @@ export default function Home() {
       console.error("Geçmiş alınamadı", err);
     }
   }
-  async function fetchModerationHistory(activeToken: string) {
-    setModerationHistoryLoading(true);
-    setModerationHistoryError("");
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/moderation/history?limit=50`, {
-        headers: { Authorization: `Bearer ${activeToken}` },
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data?.detail || "Moderasyon geçmişi alınamadı.");
-      }
-
-      setModerationHistory(Array.isArray(data?.items) ? data.items : []);
-    } catch (err) {
-      console.error("Moderasyon geçmişi alınamadı", err);
-      setModerationHistoryError(
-        err instanceof Error ? err.message : "Moderasyon geçmişi alınamadı."
-      );
-    } finally {
-      setModerationHistoryLoading(false);
-    }
-  }
-
 
   async function analyzeContent() {
     const value = content.trim();
@@ -314,7 +263,6 @@ export default function Home() {
         setUser(data.user);
         window.localStorage.setItem("truthlens_token", nextToken);
         await fetchHistory(nextToken);
-        await fetchModerationHistory(nextToken);
       }
 
       setError("");
@@ -404,8 +352,7 @@ export default function Home() {
   async function sendAnalysis(
     endpoint: string,
     body: Record<string, string>
-  ): Promise<AnalysisResult | null> {
-    let analysisData: AnalysisResult | null = null;
+  ) {
     setLoading(true);
     setError("");
     setResult(null);
@@ -426,7 +373,6 @@ export default function Home() {
       );
 
       const data = await response.json();
-      analysisData = data as AnalysisResult;
 
       if (!response.ok) {
         throw new Error(
@@ -458,12 +404,9 @@ export default function Home() {
           "Analiz sırasında bir hata oluştu. Backend'in çalıştığından emin ol."
         );
       }
-      return null;
     } finally {
       setLoading(false);
     }
-
-    return analysisData;
   }
 
   async function submitAppeal() {
@@ -472,17 +415,13 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE_URL}/moderation/appeal`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content_hash: result.content_hash, appeal_reason: appealReason.trim() }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.detail || "İtiraz gönderilemedi.");
       setAppealSent(true);
       setAppealReason("");
-      if (token) await fetchModerationHistory(token);
     } catch (err) {
       setError(err instanceof Error ? err.message : "İtiraz gönderilemedi.");
     } finally {
@@ -528,8 +467,6 @@ export default function Home() {
                     setUser(null);
                     setToken(null);
                     setHistory([]);
-                    setModerationHistory([]);
-                    setModerationHistoryError("");
                     window.localStorage.removeItem("truthlens_token");
                   }}
                   className="rounded-xl border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-800"
@@ -856,109 +793,6 @@ export default function Home() {
           </section>
         )}
 
-        {/* MODERATION / APPEAL HISTORY */}
-        {user && (
-          <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
-            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <div className="text-xs font-bold uppercase tracking-[0.28em] text-slate-500">
-                  Şeffaflık ve itiraz
-                </div>
-                <h2 className="mt-2 text-2xl font-bold text-white">
-                  Moderasyon ve itiraz geçmişi
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Bu hesap için verilen moderasyon kararları ve gönderilen itirazlar burada tutulur.
-                </p>
-              </div>
-              <button
-                onClick={() => token && fetchModerationHistory(token)}
-                disabled={moderationHistoryLoading}
-                className="rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-200 hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {moderationHistoryLoading ? "Yükleniyor..." : "Yenile"}
-              </button>
-            </div>
-
-            {moderationHistoryError && (
-              <div className="mb-4 rounded-xl border border-red-900 bg-red-950/40 p-4 text-sm text-red-300">
-                {moderationHistoryError}
-              </div>
-            )}
-
-            {moderationHistory.length === 0 && !moderationHistoryLoading ? (
-              <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-500">
-                Henüz bu hesap için moderasyon kaydı bulunmuyor.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {moderationHistory.map((item, index) => {
-                  const labels: Record<string, string> = {
-                    izin_ver: "İçeriğe izin verildi",
-                    etiketle: "Uyarı etiketi",
-                    gizle_ve_incele: "Gizle ve incele",
-                    kaldirma_oner: "Kaldırma önerisi",
-                  };
-
-                  const appealLabel =
-                    item.appeal_status === "beklemede"
-                      ? "İtiraz beklemede"
-                      : item.appeal_status
-                        ? `İtiraz: ${item.appeal_status}`
-                        : "İtiraz gönderilmedi";
-
-                  return (
-                    <div
-                      key={`${item.content_hash}-${index}`}
-                      className="rounded-xl border border-slate-800 bg-slate-950 p-4"
-                    >
-                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                        <div>
-                          <div className="font-semibold text-white">
-                            {labels[item.action] || item.action}
-                          </div>
-                          <div className="mt-1 text-xs text-slate-500">
-                            {new Date(item.created_at).toLocaleString("tr-TR")}
-                          </div>
-                        </div>
-                        <div className="rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-xs font-bold text-blue-300">
-                          Risk: {item.aggregate_risk}%
-                        </div>
-                      </div>
-
-                      <p className="mt-3 text-sm leading-6 text-slate-400">
-                        {item.reason}
-                      </p>
-
-                      <div className="mt-3">
-                        <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-400">
-                          {appealLabel}
-                        </span>
-                      </div>
-
-                      {item.appeal_reason && (
-                        <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
-                          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-400">
-                            Gönderdiğin itiraz
-                          </div>
-                          <p className="mt-1 text-sm leading-6 text-slate-300">
-                            {item.appeal_reason}
-                          </p>
-                          {item.appeal_created_at && (
-                            <div className="mt-2 text-xs text-slate-600">
-                              {new Date(item.appeal_created_at).toLocaleString("tr-TR")}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        )}
-
         {/* ADMIN / LIVE DASHBOARD PANEL */}
         <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
 
@@ -1121,20 +955,9 @@ export default function Home() {
             {/* SCORE */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900 p-8 text-center">
 
-              <div className="flex flex-wrap items-center justify-center gap-3">
-                <p className="text-sm uppercase tracking-widest text-slate-500">
-                  Gerçeklik Skoru
-                </p>
-                {result.verification?.verified && (
-                  <span
-                    title={result.verification.label}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs font-bold text-emerald-300"
-                  >
-                    <span aria-hidden="true">✓</span>
-                    TruthLens doğrulandı
-                  </span>
-                )}
-              </div>
+              <p className="text-sm uppercase tracking-widest text-slate-500">
+                Gerçeklik Skoru
+              </p>
 
               <div className="mt-3 text-7xl font-bold text-blue-400">
                 {result.score}
@@ -1146,30 +969,6 @@ export default function Home() {
               <p className="mt-4 text-lg font-medium">
                 {result.result}
               </p>
-
-              {result.verification && (
-                <div className={`mx-auto mt-5 max-w-2xl rounded-xl border p-4 text-left ${
-                  result.verification.verified
-                    ? "border-emerald-500/30 bg-emerald-500/5"
-                    : "border-slate-800 bg-slate-950/70"
-                }`}>
-                  <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">
-                    TruthLens rozet açıklaması
-                  </div>
-                  <div className="mt-2 text-sm font-semibold text-slate-200">
-                    {result.verification.verified
-                      ? "Bu içerik TruthLens'in doğruluk, güncellik, toksik bağlam ve risk kontrollerinin tamamından geçti."
-                      : "Bu içerik doğrulama rozetinin tüm koşullarını geçmedi."}
-                  </div>
-                  {result.verification.reasons && result.verification.reasons.length > 0 && (
-                    <ul className="mt-3 space-y-1.5 text-xs leading-5 text-slate-400">
-                      {result.verification.reasons.map((reason, index) => (
-                        <li key={index}>• {reason}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
 
             </div>
 
@@ -1438,7 +1237,6 @@ export default function Home() {
                       {(result.source_analysis.source_chain || []).length > 0 ? (
                         result.source_analysis.source_chain!.map((item, index) => {
                           const hasUrl = !!item.url;
-                          if (typeof item.match_probability === "number" && item.match_probability < 20) return null;
                           return (
                             <div
                               key={`${item.url || item.source}-${index}`}
@@ -1458,7 +1256,6 @@ export default function Home() {
                                     {item.date || "Tarih bilinmiyor"}
                                     {item.platform ? ` · ${item.platform}` : ""}
                                     {item.primary_probability && item.primary_probability > 0 ? ` · Birincil olasılık: %${item.primary_probability}` : ""}
-                                    {typeof item.match_probability === "number" ? ` · Eşleşme: %${item.match_probability}` : ""}
                                   </div>
                                 </div>
                                 {hasUrl && (
@@ -1694,19 +1491,9 @@ export default function Home() {
                             <div className="text-xs text-slate-500">{post.handle}</div>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          {post.verified_by_truthlens && (
-                            <span
-                              title="Bu paylaşım TruthLens tarafından tam analizden geçirilerek doğrulandı."
-                              className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold text-emerald-300"
-                            >
-                              ✓ TruthLens doğrulandı
-                            </span>
-                          )}
-                          <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-300">
-                            {post.tag}
-                          </span>
-                        </div>
+                        <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-300">
+                          {post.tag}
+                        </span>
                       </div>
 
                       <p className="text-base leading-7 text-slate-200">{post.content}</p>
@@ -1771,20 +1558,7 @@ export default function Home() {
                             setContent(post.content);
                             setMode("text");
                             setFeedOpen(false);
-                            const analyzed = await sendAnalysis("/analyze", { content: post.content });
-                            if (analyzed?.verification) {
-                              setDemoFeed((current) =>
-                                current.map((item) =>
-                                  item.id === post.id
-                                    ? {
-                                        ...item,
-                                        verification: analyzed.verification,
-                                        verified_by_truthlens: Boolean(analyzed.verification?.verified),
-                                      }
-                                    : item
-                                )
-                              );
-                            }
+                            await sendAnalysis("/analyze", { content: post.content });
                           }}
                           className="rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2 text-sm font-semibold text-blue-200 hover:bg-blue-500/20"
                         >

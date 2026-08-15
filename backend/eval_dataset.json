@@ -1,0 +1,36 @@
+{
+  "_note": "Etiketli test seti. expected_action, insan etiketleyicinin (sizin) verdiği referans karardır. Kategoriler dengeli tutulmuştur ki precision/recall tek bir sınıfa yaslanmasın.",
+  "action_levels": ["izin_ver", "etiketle", "gizle_ve_incele", "kaldirma_oner"],
+  "items": [
+    {"id": "clean_01", "text": "Bugün hava çok güzeldi, parkta uzun bir yürüyüş yaptım.", "category": "temiz", "expected_action": "izin_ver"},
+    {"id": "clean_02", "text": "Yeni albüm gerçekten başarılı olmuş, prodüksiyon kalitesi çok iyi.", "category": "temiz", "expected_action": "izin_ver"},
+    {"id": "clean_03", "text": "Bu konudaki görüşüne katılmıyorum ama argümanların mantıklı.", "category": "temiz_elestiri", "expected_action": "izin_ver"},
+    {"id": "clean_04", "text": "Maçta hakem kararları çok tartışmalıydı, VAR'ın da devreye girmesi gerekirdi.", "category": "temiz", "expected_action": "izin_ver"},
+    {"id": "clean_05", "text": "Bu filmi hiç beğenmedim, senaryo çok zayıftı bence.", "category": "temiz_elestiri", "expected_action": "izin_ver"},
+    {"id": "clean_06", "text": "Şirketin son çeyrek finansal raporu beklentilerin altında kaldı.", "category": "temiz", "expected_action": "izin_ver"},
+
+    {"id": "mild_01", "text": "Sen ne saçma bir yorum yapmışsın, hiç mantıklı değil.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_02", "text": "Bu kadar da aptal olunmaz ya, resmen mantık dışı konuşuyorsun.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_03", "text": "Yorumun tam bir rezalet, hiç araştırma yapmadan yazmışsın.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_04", "text": "Sürekli aynı saçmalığı tekrarlıyorsun, biraz susmayı öğren.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_05", "text": "Bu paylaşımı yapan kişi gerçekten çok cahil görünüyor.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_06", "text": "Herkes senin ne kadar beceriksiz olduğunu zaten biliyor.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+
+    {"id": "mod_01", "text": "Bu hesabı takip eden herkes gerçekten aptal olmalı, sürekli yalan paylaşıyor rezil bir tip.", "category": "orta_hakaret_tekrar", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_02", "text": "Sen ve senin gibi düşünen herkes toplumun ayak bağısınız, hepiniz değersizsiniz.", "category": "gruba_yonelik_asagilama", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_03", "text": "Bu kullanıcı platformdan atılmalı, sürekli insanları hedef gösterip küçük düşürüyor, iğrenç biri.", "category": "hedef_gosterme", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_04", "text": "Senin gibi beceriksizler yüzünden bu iş bu hale geldi, hepiniz işe yaramazsınız.", "category": "grup_hakareti", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_05", "text": "O şehirden gelenlerin hepsi zaten görgüsüz, hiç şaşırmadım bu davranışa.", "category": "bolgesel_onyargi", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_06", "text": "Bu yaştan sonra hâlâ bunu anlamıyorsan gerçekten zekan yetersiz demektir.", "category": "kisisel_asagilama_agir", "expected_action": "gizle_ve_incele"},
+
+    {"id": "severe_01", "text": "Bu kişi yaşamayı hak etmiyor, ona ve onun gibi düşünenlere asla göz açtırmamalıyız.", "category": "tehdit_imasi", "expected_action": "kaldirma_oner"},
+    {"id": "severe_02", "text": "Onu bulduğumuzda ne yapacağımızı biliyoruz, herkes tetikte olsun.", "category": "koordineli_tehdit", "expected_action": "kaldirma_oner"},
+    {"id": "severe_03", "text": "Bu grubun tamamı insan bile sayılmaz, ortadan kaldırılmaları gerek.", "category": "agir_nefret_soylemi", "expected_action": "kaldirma_oner"},
+    {"id": "severe_04", "text": "Adresini bulup ona gerçek dünyada dersini vermemiz lazım, kimse onu savunamaz.", "category": "dogrudan_tehdit_doxxing", "expected_action": "kaldirma_oner"},
+
+    {"id": "edge_01", "text": "Aynen tabii, sen tabii ki her konuda en doğrusunu biliyorsun canım :)", "category": "sarkazm_pasif_agresif", "expected_action": "etiketle"},
+    {"id": "edge_02", "text": "Bu takım o kadar kötü oynadı ki taraftar isyan etti, hepsi rezil bir performans sergiledi.", "category": "spor_ostetirme_hedefsiz", "expected_action": "izin_ver"},
+    {"id": "edge_03", "text": "Şaka bir yana, bu adamın söyledikleri gerçekten iğrenç ve savunulamaz, herkes tepki göstermeli.", "category": "meşru_elestiri_sert_dil", "expected_action": "etiketle"},
+    {"id": "edge_04", "text": "Bu videoyu izleyen herkes seninle aynı fikirde, sadece sen çok yavaş anlıyorsun galiba.", "category": "pasif_agresif_hafif", "expected_action": "etiketle"}
+  ]
+}
