@@ -5,6 +5,7 @@ import hashlib
 import sqlite3
 import uuid
 import threading
+import concurrent.futures
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
@@ -83,11 +84,18 @@ class SourceChainItem(BaseModel):
     date: str = ""
     platform: str = ""
     author: str = ""
+    is_likely_primary: bool = False
+    primary_probability: int = 0
 
 class SourceAnalysis(BaseModel):
     source_status: str = "uncertain"
     source_probability: int = 0
     likely_original_source: str = ""
+    likely_original_author: str = ""
+    likely_original_url: str = ""
+    likely_original_date: str = ""
+    likely_original_excerpt: str = ""
+    likely_original_platform: str = ""
     earliest_found_source: str = ""
     earliest_found_date: str = ""
     current_source_date: str = ""
@@ -664,8 +672,13 @@ def summarize_demo_feed(posts: List[dict]) -> dict:
 # ============================================================
 
 def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
     return conn
 
 
@@ -860,7 +873,15 @@ def is_nsosyal_url(url: str) -> bool:
 def is_nsosyal_post_url(url: str) -> bool:
     return bool(re.match(r"^https?://(?:www\.)?nsosyal\.com/post/[0-9]+(?:/)?(?:\?.*)?$", url, re.IGNORECASE))
 
+HTML_CACHE_LOCK = threading.Lock()
+HTML_CACHE: Dict[str, str] = {}
+
 def fetch_webpage(url: str) -> Optional[str]:
+    url = url.strip()
+    with HTML_CACHE_LOCK:
+        if url in HTML_CACHE:
+            return HTML_CACHE[url]
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -870,11 +891,14 @@ def fetch_webpage(url: str) -> Optional[str]:
         "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
     }
     try:
-        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
         response.raise_for_status()
-        return response.text
+        text = response.text
+        with HTML_CACHE_LOCK:
+            HTML_CACHE[url] = text
+        return text
     except Exception as e:
-        print(f"[TruthLens] Web request error: {e}")
+        print(f"[TruthLens] Web request error for {url}: {e}")
         return None
 
 def get_json_ld_objects(soup: BeautifulSoup) -> List[dict]:
@@ -1069,12 +1093,22 @@ def extract_primary_image_url(url: str) -> str:
     metadata = extract_page_metadata(html, url)
     return str(metadata.get("image_url", "") or "").strip()
 
+SIGHTENGINE_CACHE_LOCK = threading.Lock()
+SIGHTENGINE_CACHE: Dict[str, dict] = {}
+
 def detect_ai_image(image_url: str) -> Optional[dict]:
     if not image_url_is_reasonable(image_url):
         return None
     if not SIGHTENGINE_API_USER or not SIGHTENGINE_API_SECRET:
         return None
 
+    image_url = image_url.strip()
+    with SIGHTENGINE_CACHE_LOCK:
+        if image_url in SIGHTENGINE_CACHE:
+            print(f"[TruthLens] Image AI check (cached): {image_url}")
+            return SIGHTENGINE_CACHE[image_url]
+
+    t0 = time.time()
     try:
         response = requests.get(
             "https://api.sightengine.com/1.0/check.json",
@@ -1128,11 +1162,16 @@ def detect_ai_image(image_url: str) -> Optional[dict]:
     if is_ai is None and ai_probability > 0:
         is_ai = ai_probability >= 50
 
-    return {
+    res = {
         "ai_probability": ai_probability,
         "is_ai": bool(is_ai) if is_ai is not None else None,
         "error": None,
     }
+    with SIGHTENGINE_CACHE_LOCK:
+        SIGHTENGINE_CACHE[image_url] = res
+    dur = time.time() - t0
+    print(f"[TruthLens] Image AI check: {image_url} -> {dur:.2f}s")
+    return res
 
 def image_cache_key(image_url: str, source_url: str = "") -> str:
     raw = f"truthlens:image:v1|{normalize_url(source_url)}|{normalize_url(image_url)}"
@@ -1387,7 +1426,17 @@ def build_source_chain(
 # TAVILY 
 # ============================================================
 
+TAVILY_CACHE_LOCK = threading.Lock()
+TAVILY_CACHE: Dict[str, List[dict]] = {}
+
 def search_with_tavily(query: str, max_results: int = 5) -> List[dict]:
+    query_key = f"{query}|{max_results}"
+    with TAVILY_CACHE_LOCK:
+        if query_key in TAVILY_CACHE:
+            print(f"[TruthLens] Tavily search (cached): '{query}'")
+            return TAVILY_CACHE[query_key]
+
+    t0 = time.time()
     client = get_tavily_client()
     try:
         response = client.search(
@@ -1403,6 +1452,10 @@ def search_with_tavily(query: str, max_results: int = 5) -> List[dict]:
                 "url": item.get("url", ""),
                 "content": (item.get("content") or "")[:800],
             })
+        with TAVILY_CACHE_LOCK:
+            TAVILY_CACHE[query_key] = results
+        dur = time.time() - t0
+        print(f"[TruthLens] Tavily search: '{query}' -> {dur:.2f}s")
         return results
     except Exception as e:
         print(f"[TruthLens] Tavily error: {e}")
@@ -1744,6 +1797,7 @@ def analyze_source_chain(
     current_date: str = "",
     current_site: str = "",
 ) -> dict:
+    t_start = time.time()
 
     query = extract_claims_for_source_analysis(
         title,
@@ -1754,92 +1808,289 @@ def analyze_source_chain(
     if not query:
         return SourceAnalysis().model_dump()
 
-    research = search_with_tavily(query, max_results=10)
+    # Step 1: Query Formulation & suspected producer analysis via LLM
+    t0_q = time.time()
+    prompt_query = f"""
+    Aşağıdaki içeriğin konusunu ve ana iddiasını analiz et.
+    Bu iddianın ilk/gerçek üreticisi olan BİRİNCİL KAYNAĞI (official site, original social media post) bulabilmek için Tavily'de aratılacak 2 adet Türkçe ve arama operatörleri içeren detaylı arama sorgusu oluştur.
+    Özellikle resmî kurumlar, resmî sosyal medya hesapları (X/Twitter, Facebook, Instagram vb.) ve haber kaynaklarına odaklan.
+    
+    Başlık: {title}
+    Açıklama: {description}
+    İçerik: {body[:1000]}
+    
+    Yalnızca JSON formatında yanıt ver:
+    {{
+      "suspected_primary_producer": "Olası ilk üretici kurum/kişi adı (örn. 'Millî Eğitim Bakanlığı')",
+      "search_queries": [
+        "arama sorgusu 1",
+        "arama sorgusu 2"
+      ]
+    }}
+    """
 
-    chain_items = []
+    queries = []
+    try:
+        raw_res = call_llm([{"role": "user", "content": prompt_query}], temperature=0.1)
+        data_res = json.loads(raw_res)
+        queries = [q for q in data_res.get("search_queries", []) if q]
+    except Exception as e:
+        print(f"[TruthLens] Query formulation error: {e}")
 
-    for item in research:
+    dur_q = time.time() - t0_q
+    print(f"[TruthLens] Source chain query formulation: {dur_q:.2f}s")
+
+    if not queries:
+        queries = [query]
+
+    # Step 2: Tavily Search and URL Scraping
+    t0_tavily = time.time()
+    unique_urls = set()
+    raw_results = []
+    
+    for q in queries[:2]:
+        results = search_with_tavily(q, max_results=5)
+        for r in results:
+            url = r.get("url")
+            if url and url not in unique_urls:
+                unique_urls.add(url)
+                raw_results.append(r)
+                
+    if current_url and current_url not in unique_urls:
+        unique_urls.add(current_url)
+        raw_results.append({
+            "title": title or "Mevcut Paylaşım",
+            "url": current_url,
+            "content": body[:800]
+        })
+
+    dur_tavily = time.time() - t0_tavily
+    print(f"[TruthLens] Source chain Tavily query: {dur_tavily:.2f}s")
+
+    t_fetch_start = time.time()
+
+    def process_candidate(item):
         item_url = str(item.get("url", "") or "").strip()
-
-        if not item_url:
-            continue
-
-        item_title = str(
-            item.get("title", "") or ""
-        ).strip()
-
+        item_title = str(item.get("title", "") or "").strip()
+        item_content = str(item.get("content", "") or "").strip()
+        
         published = ""
-        site_name = ""
-
+        author = ""
+        site_name = get_domain(item_url)
+        
         try:
+            if item_url == current_url:
+                published = current_date or published
+                site_name = current_site or site_name
+                
             html = fetch_webpage(item_url)
-
             if html:
-                meta = extract_page_metadata(
-                    html,
-                    item_url,
-                )
-
-                published = parse_datetime_value(
-                    meta.get("published_time", "")
-                )
-
-                site_name = str(
-                    meta.get("site_name", "")
-                    or ""
-                ).strip()
-
-                # Sayfanın gerçek başlığı varsa onu tercih et.
+                meta = extract_page_metadata(html, item_url)
+                published = parse_datetime_value(meta.get("published_time", "")) or published
+                author = str(meta.get("author", "") or "").strip()
+                site_name = str(meta.get("site_name", "") or site_name).strip()
                 if meta.get("title"):
-                    item_title = str(
-                        meta.get("title")
-                    ).strip()
-
+                    item_title = str(meta.get("title")).strip()
+                if meta.get("article_body"):
+                    item_content = str(meta.get("article_body")).strip()
         except Exception as exc:
-            print(
-                f"[TruthLens] Source metadata error: {exc}"
-            )
-
-        # Sadece platform adını başlık olarak bırakma.
-        if not item_title:
-            item_title = "Birincil kaynak adayı"
-
-        generic_platform_titles = {
-            "x",
-            "twitter",
-            "bluesky",
-            "facebook",
-            "instagram",
-            "tiktok",
-            "nsosyal",
+            print(f"[TruthLens] Source metadata fetching error for {item_url}: {exc}")
+            
+        return {
+            "title": item_title,
+            "url": item_url,
+            "date": published,
+            "platform": site_name,
+            "author": author,
+            "excerpt": item_content[:300]
         }
 
-        if item_title.lower() in generic_platform_titles:
-            item_title = (
-                f"{site_name} paylaşımı"
-                if site_name
-                else "Doğrudan paylaşım"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        candidates = list(executor.map(process_candidate, raw_results))
+        
+    dur_fetch = time.time() - t_fetch_start
+    print(f"[TruthLens] Concurrently fetched candidate metadata ({len(raw_results)} items): {dur_fetch:.2f}s")
+
+    if not candidates:
+        candidates.append({
+            "title": title or "Paylaşım",
+            "url": current_url or "",
+            "date": current_date or "",
+            "platform": current_site or (get_domain(current_url) if current_url else ""),
+            "author": "",
+            "excerpt": body[:300]
+        })
+
+    # Step 3: LLM evaluation of candidates to find the primary source
+    candidates_formatted = []
+    for idx, c in enumerate(candidates):
+        candidates_formatted.append(
+            f"Aday #{idx}\n"
+            f"Başlık/Kaynak Adı: {c['title']}\n"
+            f"URL: {c['url']}\n"
+            f"Tarih/Saat: {c['date'] or 'Belirtilmemiş'}\n"
+            f"Platform: {c['platform'] or 'Belirtilmemiş'}\n"
+            f"Yazar/Hesap: {c['author'] or 'Belirtilmemiş'}\n"
+            f"Alıntı: {c['excerpt']}\n"
+            f"---"
+        )
+    candidates_str = "\n".join(candidates_formatted)
+    
+    prompt_evaluate = f"""
+    Sen TruthLens AI Türkçe birincil kaynak tespit modülüsün.
+    Aşağıda incelenen iddianın içeriği ve bu konuyla ilgili internetten toplanan aday kaynaklar verilmiştir.
+    
+    İNCELENEN İÇERİK:
+    Başlık: {title}
+    Açıklama: {description}
+    İçerik: {body[:1000]}
+    Mevcut URL: {current_url or "Belirtilmemiş"}
+    Mevcut Tarih: {current_date or "Belirtilmemiş"}
+    
+    ADAY KAYNAKLAR:
+    {candidates_str}
+    
+    Lütfen bu adayları analiz et:
+    1. İddianın veya haberin ilk/gerçek üreticisi (BİRİNCİL KAYNAK) olan paylaşımı veya resmi duyuruyu tespit et.
+    2. Bir kurumun resmi hesabı, resmi web sitesi (.gov.tr, vb.) veya doğrudan ilgili kişinin paylaşımı her zaman haber sitelerinden ve ikincil alıntılardan daha birincil sayılmalıdır.
+    3. Yayınlanma tarihlerini karşılaştır. Daha erken yayınlananlar ve doğrudan resmi açıklama yapanlar önceliklidir.
+    4. Her aday için "primary_probability" (bu adayın gerçek birincil kaynak/ilk paylaşım olma ihtimali %) değerini belirle.
+       - Resmi kurum/kişi paylaşımıysa ve ilk paylaşım olduğu yüksek ihtimalse yüksek bir skor (%80-%100) ver.
+       - Haber sitesi, ikincil aktarıcı veya sadece alıntı yapan bir siteyse daha düşük skor ver.
+       - Eğer yeterli kanıt veya tarih bilgisi yoksa veya kesin doğrulanamıyorsa orta/düşük bir olasılık skoru ver.
+    5. Birincil kaynak olarak seçilen adayın detaylarını belirle:
+       - `likely_original_source`: Kurum veya kişi adı (örn. 'Millî Eğitim Bakanlığı', 'Ahmet Yılmaz'). Platform adını (X, Facebook, nsosyal vb.) doğrudan buraya yazma!
+       - `likely_original_author`: Paylaşımı yapan hesabın kullanıcı adı (örn. '@tcmeb', '@ahmetyilmaz'). Eğer kullanıcı adı yoksa boş bırak.
+       - `likely_original_url`: Bu paylaşımın veya resmi duyurunun tam URL'si (asla domain ana sayfasını vermeyin, tam path olsun, örn: 'https://x.com/tcmeb/status/123456').
+       - `likely_original_date`: Paylaşım tarihi.
+       - `likely_original_excerpt`: Paylaşım metninden veya duyurudan kısa bir alıntı.
+       - `likely_original_platform`: Hangi platformda yapıldığı (X, Facebook, Web Sitesi, Instagram vb.).
+       
+    Yanıtı sadece aşağıdaki JSON formatında döndür:
+    {{
+      "primary_source_index": 0,
+      "primary_probability": 92,
+      "source_status": "strong_candidate / candidate / uncertain",
+      "reasoning": "Neden bu kaynağı ve bu yüzdeyi seçtiğine dair Türkçe açıklama. Kesinlik durumunu belirt.",
+      "evaluated_candidates": [
+        {{
+          "source": "Temizlenmiş kaynak/kurum/kişi adı (asla sadece X veya Facebook yazma)",
+          "author": "@kullaniciadi veya boş",
+          "platform": "Platform adı (örn. X, Facebook, Web Sitesi)",
+          "date": "Tarih bilgisi",
+          "url": "Tam paylaşım URL'si (path korunacak)",
+          "is_likely_primary": true,
+          "primary_probability": 92
+        }}
+      ]
+    }}
+    """
+
+    t0_eval = time.time()
+    try:
+        raw_eval = call_llm([{"role": "user", "content": prompt_evaluate}], temperature=0.1)
+        data_eval = json.loads(raw_eval)
+        
+        primary_prob = safe_score(data_eval.get("primary_probability"), 0)
+        status = str(data_eval.get("source_status") or "uncertain").strip()
+        reasoning = str(data_eval.get("reasoning") or "Analiz tamamlandı.").strip()
+        
+        # Primary item details
+        likely_original_source = ""
+        likely_original_author = ""
+        likely_original_url = ""
+        likely_original_date = ""
+        likely_original_excerpt = ""
+        likely_original_platform = ""
+        
+        idx = data_eval.get("primary_source_index", -1)
+        if 0 <= idx < len(candidates):
+            prim_c = candidates[idx]
+            likely_original_source = str(data_eval.get("likely_original_source") or prim_c.get("title") or "").strip()
+            likely_original_author = str(data_eval.get("likely_original_author") or prim_c.get("author") or "").strip()
+            likely_original_url = str(data_eval.get("likely_original_url") or prim_c.get("url") or "").strip()
+            likely_original_date = str(data_eval.get("likely_original_date") or prim_c.get("date") or "").strip()
+            likely_original_excerpt = str(data_eval.get("likely_original_excerpt") or prim_c.get("excerpt") or "").strip()
+            likely_original_platform = str(data_eval.get("likely_original_platform") or prim_c.get("platform") or "").strip()
+        else:
+            likely_original_source = str(data_eval.get("likely_original_source") or "").strip()
+            likely_original_author = str(data_eval.get("likely_original_author") or "").strip()
+            likely_original_url = str(data_eval.get("likely_original_url") or "").strip()
+            likely_original_date = str(data_eval.get("likely_original_date") or "").strip()
+            likely_original_excerpt = str(data_eval.get("likely_original_excerpt") or "").strip()
+            likely_original_platform = str(data_eval.get("likely_original_platform") or "").strip()
+
+        source_chain_items = []
+        for item in data_eval.get("evaluated_candidates", []):
+            source_chain_items.append(
+                SourceChainItem(
+                    source=str(item.get("source") or "").strip(),
+                    url=str(item.get("url") or "").strip(),
+                    date=str(item.get("date") or "").strip(),
+                    platform=str(item.get("platform") or "").strip(),
+                    author=str(item.get("author") or "").strip(),
+                    is_likely_primary=bool(item.get("is_likely_primary")),
+                    primary_probability=safe_score(item.get("primary_probability"), 0),
+                )
             )
+            
+        if not source_chain_items:
+            for c in candidates:
+                source_chain_items.append(
+                    SourceChainItem(
+                        source=c.get("title") or "Aday",
+                        url=c.get("url") or "",
+                        date=c.get("date") or "",
+                        platform=c.get("platform") or "",
+                        author=c.get("author") or "",
+                        is_likely_primary=False,
+                        primary_probability=0
+                    )
+                )
 
-        chain_items.append({
-    "source": item_title,
-    "url": item_url,
-    "date": published or "",
-    "platform": site_name or get_domain(item_url),
-    "author": str(
-        meta.get("author", "")
-        if html
-        else ""
-    ).strip(),
-})
+        dur_eval = time.time() - t0_eval
+        print(f"[TruthLens] Source chain LLM eval: {dur_eval:.2f}s")
+        print(f"[TruthLens] Total Source chain: {time.time() - t_start:.2f}s")
 
-    built = build_source_chain(
-        chain_items,
-        current_url,
-        current_date,
-    )
+        return SourceAnalysis(
+            source_status=status,
+            source_probability=primary_prob,
+            likely_original_source=likely_original_source,
+            likely_original_author=likely_original_author,
+            likely_original_url=likely_original_url,
+            likely_original_date=likely_original_date,
+            likely_original_excerpt=likely_original_excerpt,
+            likely_original_platform=likely_original_platform,
+            earliest_found_source=likely_original_source,
+            earliest_found_date=likely_original_date,
+            current_source_date=current_date,
+            source_chain=source_chain_items,
+            reasoning=reasoning
+        ).model_dump()
 
-    return built
+    except Exception as e:
+        print(f"[TruthLens] LLM evaluation error in analyze_source_chain: {e}")
+        source_chain_items = []
+        for c in candidates:
+            source_chain_items.append(
+                SourceChainItem(
+                    source=c.get("title") or "Aday",
+                    url=c.get("url") or "",
+                    date=c.get("date") or "",
+                    platform=c.get("platform") or "",
+                    author=c.get("author") or "",
+                    is_likely_primary=False,
+                    primary_probability=0
+                )
+            )
+        return SourceAnalysis(
+            source_status="uncertain",
+            source_probability=0,
+            likely_original_source="Doğrulanamadı",
+            current_source_date=current_date,
+            source_chain=source_chain_items,
+            reasoning=f"Kaynak analizi sırasında hata oluştu: {str(e)}"
+        ).model_dump()
 
 @app.post("/login")
 def login(request: LoginRequest):
@@ -1907,10 +2158,13 @@ def history(request: Request):
 
 @app.post("/analyze", response_model=AnalysisResponse)
 def analyze(request_body: AnalysisRequest, request: Request):
+    t_start = time.time()
+    
     original = request_body.content.strip()
     if not original:
         raise HTTPException(status_code=400, detail="İçerik boş olamaz.")
 
+    t_url_start = time.time()
     url = extract_url(original)
     analyzed_content = original
     source_url = None
@@ -1928,31 +2182,55 @@ def analyze(request_body: AnalysisRequest, request: Request):
         analyzed_content = post["text"]
         print(f"[TruthLens] İçerik alındı ({post.get('method')}), uzunluk: {len(analyzed_content)}")
 
-    result = run_analysis(analyzed_content, source_url)
+    dur_url = time.time() - t_url_start
+    print(f"[TruthLens] URL extraction & scraping: {dur_url:.2f}s")
 
     image_ai_probability = 0
     image_is_ai = None
     image_analysis_available = False
     source_analysis = SourceAnalysis()
 
-    if url:
-        metadata = (post.get("metadata") or {}) if "post" in locals() else {}
-        primary_image = str(metadata.get("image_url", "") or "").strip()
-        if primary_image:
-            image_analysis_available = True
-            image_analysis = detect_ai_image(primary_image)
+    # Parallel execution using ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        # Submit run_analysis
+        future_result = executor.submit(run_analysis, analyzed_content, source_url)
+        
+        # Submit detect_ai_image if primary_image exists
+        future_image = None
+        if url:
+            metadata = (post.get("metadata") or {}) if "post" in locals() else {}
+            primary_image = str(metadata.get("image_url", "") or "").strip()
+            if primary_image:
+                image_analysis_available = True
+                future_image = executor.submit(detect_ai_image, primary_image)
+                
+        # Submit analyze_source_chain if url exists
+        future_source = None
+        if url:
+            metadata = (post.get("metadata") or {}) if "post" in locals() else {}
+            future_source = executor.submit(
+                analyze_source_chain,
+                title=str((metadata.get("title") or post.get("title") or "") if "post" in locals() else ""),
+                description=str(metadata.get("description", "") or ""),
+                body=analyzed_content,
+                current_url=source_url or url,
+                current_date=str(metadata.get("published_time", "") or ""),
+                current_site=str(metadata.get("site_name", "") or ""),
+            )
+            
+        # Get run_analysis result
+        result = future_result.result()
+        
+        # Get image analysis result
+        if future_image:
+            image_analysis = future_image.result()
             if image_analysis:
                 image_ai_probability = safe_score(image_analysis.get("ai_probability"))
                 image_is_ai = image_analysis.get("is_ai")
-
-        source_analysis = analyze_source_chain(
-            title=str((metadata.get("title") or post.get("title") or "") if "post" in locals() else ""),
-            description=str(metadata.get("description", "") or ""),
-            body=analyzed_content,
-            current_url=source_url or url,
-            current_date=str(metadata.get("published_time", "") or ""),
-            current_site=str(metadata.get("site_name", "") or ""),
-        )
+                
+        # Get source analysis result
+        if future_source:
+            source_analysis = future_source.result()
 
     result = result.model_copy(update={
         "image_ai_probability": image_ai_probability,
@@ -1967,6 +2245,8 @@ def analyze(request_body: AnalysisRequest, request: Request):
         result_payload = json.loads(result.model_dump_json())
         save_analysis_history(user["id"], content_hash, source_url, result_payload)
 
+    dur_total = time.time() - t_start
+    print(f"[TruthLens] Total analyze endpoint: {dur_total:.2f}s")
     return result
 
 @app.post("/analyze-url", response_model=AnalysisResponse)

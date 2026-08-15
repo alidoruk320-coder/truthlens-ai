@@ -46,15 +46,23 @@ interface AnalysisResult {
     source_status?: string;
     source_probability?: number;
     likely_original_source?: string;
+    likely_original_author?: string;
+    likely_original_url?: string;
+    likely_original_date?: string;
+    likely_original_excerpt?: string;
+    likely_original_platform?: string;
     earliest_found_source?: string;
     earliest_found_date?: string;
     current_source_date?: string;
     source_chain?: {
-  source: string;
-  url?: string;
-  date: string;
-  platform?: string;
-}[];
+      source: string;
+      url?: string;
+      date: string;
+      platform?: string;
+      author?: string;
+      is_likely_primary?: boolean;
+      primary_probability?: number;
+    }[];
     reasoning?: string;
   };
 }
@@ -656,7 +664,7 @@ export default function Home() {
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="mb-3 flex items-center gap-2">
-              <span className="text-lg">🕒</span>
+              <span className="text-lg"></span>
               <span className="text-sm font-semibold text-slate-300">Context AI</span>
             </div>
             <p className="text-sm leading-6 text-slate-500">
@@ -666,7 +674,7 @@ export default function Home() {
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="mb-3 flex items-center gap-2">
-              <span className="text-lg">🔁</span>
+              <span className="text-lg"></span>
               <span className="text-sm font-semibold text-slate-300">Yankı Odası</span>
             </div>
             <p className="text-sm leading-6 text-slate-500">
@@ -676,7 +684,7 @@ export default function Home() {
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="mb-3 flex items-center gap-2">
-              <span className="text-lg">⚖️</span>
+              <span className="text-lg"></span>
               <span className="text-sm font-semibold text-slate-300">Kutuplaştırma Ölçer</span>
             </div>
             <p className="text-sm leading-6 text-slate-500">
@@ -686,7 +694,7 @@ export default function Home() {
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="mb-3 flex items-center gap-2">
-              <span className="text-lg">✍️</span>
+              <span className="text-lg"></span>
               <span className="text-sm font-semibold text-slate-300">AI Yeniden Yazım</span>
             </div>
             <p className="text-sm leading-6 text-slate-500">
@@ -696,7 +704,7 @@ export default function Home() {
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="mb-3 flex items-center gap-2">
-              <span className="text-lg">📊</span>
+              <span className="text-lg"></span>
               <span className="text-sm font-semibold text-slate-300">Yönetici Konsolu</span>
             </div>
             <p className="text-sm leading-6 text-slate-500">
@@ -1089,19 +1097,54 @@ export default function Home() {
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-  Muhtemel birincil paylaşım
-</div>
-
-<div className="mt-2 text-lg font-semibold text-white">
-  {result.source_analysis.likely_original_source || "Belirlenemedi"}
-</div>
-                    </div>
-                    <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
-                     <div className="text-xs uppercase tracking-[0.2em] text-slate-500"> Birincil kaynak olma ihtimali </div>
-                      <div className="mt-2 text-2xl font-bold text-emerald-300">
-                        {result.source_analysis.source_probability ?? 0}%
+                      <div className="text-xs uppercase tracking-[0.2em] text-slate-500 mb-2">
+                        Muhtemel birincil paylaşım
                       </div>
+                      <div className="text-lg font-bold text-white">
+                        {result.source_analysis.likely_original_source || "Belirlenemedi"}
+                      </div>
+                      {result.source_analysis.likely_original_author && (
+                        <div className="text-sm text-blue-400 font-mono mt-0.5">
+                          {result.source_analysis.likely_original_author}
+                        </div>
+                      )}
+                      {result.source_analysis.likely_original_excerpt && (
+                        <div className="mt-3 text-sm text-slate-300 italic border-l-2 border-slate-800 pl-3 py-1">
+                          “{result.source_analysis.likely_original_excerpt}”
+                        </div>
+                      )}
+                      {result.source_analysis.likely_original_date && (
+                        <div className="mt-2 text-xs text-slate-500">
+                          {result.source_analysis.likely_original_date}
+                        </div>
+                      )}
+                      {result.source_analysis.likely_original_url && (
+                        <div className="mt-3">
+                          <a
+                            href={result.source_analysis.likely_original_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-block rounded-lg bg-blue-600 hover:bg-blue-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
+                          >
+                            Paylaşımı Gör →
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                    <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 flex flex-col justify-between">
+                      <div>
+                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                          BİRİNCİL KAYNAK OLMA İHTİMALİ
+                        </div>
+                        <div className="mt-2 text-3xl font-extrabold text-emerald-400">
+                          {result.source_analysis.source_probability ?? 0}%
+                        </div>
+                      </div>
+                      {result.source_analysis.likely_original_platform && (
+                        <div className="mt-4 text-xs text-slate-500 font-medium">
+                          Platform: <span className="text-slate-300 font-semibold">{result.source_analysis.likely_original_platform}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1118,49 +1161,57 @@ export default function Home() {
                   </button>
 
                   {sourceChainOpen && (
-  <div className="space-y-3">
-    {(result.source_analysis.source_chain || []).length > 0 ? (
-      result.source_analysis.source_chain!.map((item, index) => (
-        <a
-          key={`${item.url || item.source}-${index}`}
-          href={item.url || "#"}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="block rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm transition hover:border-blue-500 hover:bg-slate-900"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="font-semibold text-blue-400">
-                {item.source || "Birincil kaynak adayı"}
-              </div>
-
-              <div className="mt-1 text-xs text-slate-500">
-                {item.date || "Tarih bilinmiyor"}
-                {item.platform
-                  ? ` · ${item.platform}`
-                  : ""}
-              </div>
-            </div>
-
-            <span className="shrink-0 text-xs text-blue-400">
-              Aç ↗
-            </span>
-          </div>
-
-          {item.url && (
-            <div className="mt-3 break-all text-xs text-slate-600">
-              {item.url}
-            </div>
-          )}
-        </a>
-      ))
-    ) : (
-      <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-slate-500">
-        Birincil kaynak adayı bulunamadı.
-      </div>
-    )}
-  </div>
-)}
+                    <div className="space-y-3">
+                      {(result.source_analysis.source_chain || []).length > 0 ? (
+                        result.source_analysis.source_chain!.map((item, index) => {
+                          const hasUrl = !!item.url;
+                          return (
+                            <div
+                              key={`${item.url || item.source}-${index}`}
+                              className="block rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm transition"
+                            >
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="space-y-1">
+                                  <div className="font-semibold text-white">
+                                    {item.source || "Birincil kaynak adayı"}
+                                  </div>
+                                  {item.author && (
+                                    <div className="text-xs text-blue-400 font-mono">
+                                      {item.author}
+                                    </div>
+                                  )}
+                                  <div className="text-xs text-slate-500">
+                                    {item.date || "Tarih bilinmiyor"}
+                                    {item.platform ? ` · ${item.platform}` : ""}
+                                    {item.primary_probability && item.primary_probability > 0 ? ` · Olasılık: %${item.primary_probability}` : ""}
+                                  </div>
+                                </div>
+                                {hasUrl && (
+                                  <a
+                                    href={item.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="shrink-0 rounded-lg bg-slate-900 border border-slate-800 hover:border-blue-500 hover:bg-slate-800 px-2.5 py-1.5 text-xs text-blue-400 transition"
+                                  >
+                                    Kaynağı Aç ↗
+                                  </a>
+                                )}
+                              </div>
+                              {item.url && (
+                                <div className="mt-3 break-all text-xs text-slate-600 font-mono">
+                                  {item.url}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-slate-500">
+                          Birincil kaynak adayı bulunamadı.
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </Card>
             )}
