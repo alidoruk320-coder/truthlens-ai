@@ -86,6 +86,7 @@ class SourceChainItem(BaseModel):
     author: str = ""
     is_likely_primary: bool = False
     primary_probability: int = 0
+    match_probability: int = 0
 
 class SourceAnalysis(BaseModel):
     source_status: str = "uncertain"
@@ -136,7 +137,15 @@ class ModerationDecision(BaseModel):
     appeal_eligible: bool = False
     aggregate_risk: int = 0
 
+class VerificationBadge(BaseModel):
+    verified: bool = False
+    label: str = "TruthLens doğrulaması tamamlanmadı"
+    short_label: str = "Doğrulanmadı"
+    reasons: List[str] = Field(default_factory=list)
+
+
 class AnalysisResponse(BaseModel):
+    content_hash: str = ""
     score: int
     manipulation: int
     clickbait: int
@@ -154,6 +163,7 @@ class AnalysisResponse(BaseModel):
     social_risk_summary: str
     toxicity: ToxicityAnalysis = Field(default_factory=ToxicityAnalysis)
     moderation: ModerationDecision = Field(default_factory=ModerationDecision)
+    verification: VerificationBadge = Field(default_factory=VerificationBadge)
 
     claims: List[str]
     context: str
@@ -243,6 +253,75 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
         requires_human_review=False,
         appeal_eligible=False,
         aggregate_risk=aggregate_risk,
+    )
+
+
+def compute_truthlens_verification(result: AnalysisResponse, has_source_url: bool = False) -> VerificationBadge:
+    """TruthLens doğrulama rozetini mevcut analiz kontrollerine göre üretir."""
+    reasons: List[str] = []
+
+    correct_results = {"doğru", "büyük ölçüde doğru"}
+    if stable_text(result.result) not in correct_results:
+        reasons.append("Doğruluk sonucu rozet için yeterince güçlü değil.")
+
+    if result.score < 80:
+        reasons.append(f"Gerçeklik skoru {result.score}/100; rozet eşiği 80.")
+
+    if result.manipulation > 20:
+        reasons.append(f"Manipülasyon riski {result.manipulation}/100; eşik 20.")
+
+    if result.clickbait > 20:
+        reasons.append(f"Clickbait riski {result.clickbait}/100; eşik 20.")
+
+    if result.polarization_risk > 30:
+        reasons.append(f"Kutuplaşma riski {result.polarization_risk}/100; eşik 30.")
+
+    if stable_text(result.validity) != "geçerli":
+        reasons.append("İçeriğin geçerlilik/güncellik durumu rozet için uygun değil.")
+
+    toxicity = result.toxicity
+    if stable_text(toxicity.risk_level) != "düşük":
+        reasons.append("Toksisite risk seviyesi düşük değil.")
+    if max(toxicity.insult, toxicity.bullying, toxicity.hate_speech) > 20:
+        reasons.append("Toksisite sinyallerinden en az biri 20/100 üzerinde.")
+
+    if result.moderation.action != "izin_ver":
+        reasons.append("Moderasyon kararı 'izin ver' seviyesinde değil.")
+
+    if result.contradicting_sources:
+        reasons.append("Çelişen kaynaklar bulunduğu için rozet verilmedi.")
+
+    if has_source_url:
+        source = result.source_analysis
+        if not source or source.source_probability < 70:
+            reasons.append("Kaynak zincirinde yeterince güçlü bir birincil kaynak doğrulaması yok.")
+        if source and stable_text(source.source_status) == "uncertain":
+            reasons.append("Birincil kaynak durumu belirsiz.")
+
+    if reasons:
+        return VerificationBadge(
+            verified=False,
+            label="TruthLens doğrulaması tamamlanmadı",
+            short_label="Doğrulanmadı",
+            reasons=reasons,
+        )
+
+    return VerificationBadge(
+        verified=True,
+        label="TruthLens tarafından doğrulandı",
+        short_label="Doğrulandı",
+        reasons=[
+            f"Doğruluk: {result.result} · gerçeklik skoru {result.score}/100.",
+            f"Güncellik/geçerlilik: {result.validity} · zaman değerlendirmesi: {result.time_validity}.",
+            (
+                f"Toksik bağlam: hakaret %{toxicity.insult}, zorbalık %{toxicity.bullying}, "
+                f"nefret dili %{toxicity.hate_speech} · risk {toxicity.risk_level}."
+            ),
+            f"Toksisite hedefi/bağlamı: {toxicity.targeted_person_or_group}.",
+            f"Manipülasyon %{result.manipulation} · clickbait %{result.clickbait} · kutuplaşma %{result.polarization_risk}.",
+            f"Moderasyon: {result.moderation.action_label} · toplam risk %{result.moderation.aggregate_risk}.",
+            "Tüm TruthLens doğrulama koşulları sağlandı.",
+        ],
     )
 
 
@@ -555,6 +634,9 @@ def fetch_bluesky_feed(limit: int = BLUESKY_FEED_LIMIT) -> dict:
 
             post_payload = {
                 **normalized,
+                # Feed badge is granted only after the user runs the full /analyze flow.
+                # The frontend updates this field for the current session when verification passes.
+                "verified_by_truthlens": False,
                 "truthlens_score": estimated.get("truthlens_score", 0),
                 "misinformation_risk": estimated.get("misinformation_risk", 0),
                 "polarization": estimated.get("polarization", 0),
@@ -808,6 +890,7 @@ def init_db() -> None:
 
         CREATE TABLE IF NOT EXISTS moderation_decisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER DEFAULT NULL,
             content_hash TEXT NOT NULL,
             action TEXT NOT NULL,
             aggregate_risk INTEGER NOT NULL,
@@ -819,6 +902,42 @@ def init_db() -> None:
         );
         """
     )
+
+    # Existing SQLite databases: add the new column/index without destroying data.
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(moderation_decisions)").fetchall()
+    }
+    if "user_id" not in columns:
+        conn.execute(
+            "ALTER TABLE moderation_decisions ADD COLUMN user_id INTEGER DEFAULT NULL"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_moderation_decisions_user_id "
+        "ON moderation_decisions(user_id, id DESC)"
+    )
+
+    # Eski moderasyon kayitlarini ayni content_hash uzerinden
+    # analysis_history icindeki kullaniciya bagla.
+    conn.execute(
+        """
+        UPDATE moderation_decisions
+        SET user_id = (
+            SELECT ah.user_id
+            FROM analysis_history ah
+            WHERE ah.content_hash = moderation_decisions.content_hash
+            ORDER BY ah.id DESC
+            LIMIT 1
+        )
+        WHERE user_id IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM analysis_history ah2
+            WHERE ah2.content_hash = moderation_decisions.content_hash
+          )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -879,14 +998,21 @@ def save_analysis_history(user_id: int, content_hash: str, source_url: Optional[
     conn.commit()
     conn.close()
 
-def log_moderation_decision(content_hash: str, moderation: "ModerationDecision") -> None:
+def log_moderation_decision(
+    content_hash: str,
+    moderation: "ModerationDecision",
+    user_id: Optional[int] = None,
+) -> None:
     conn = get_db_connection()
     conn.execute(
         """
-        INSERT INTO moderation_decisions (content_hash, action, aggregate_risk, reason, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO moderation_decisions (
+            user_id, content_hash, action, aggregate_risk, reason, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
+            user_id,
             content_hash,
             moderation.action,
             moderation.aggregate_risk,
@@ -898,19 +1024,34 @@ def log_moderation_decision(content_hash: str, moderation: "ModerationDecision")
     conn.close()
 
 
-def submit_moderation_appeal(content_hash: str, appeal_reason: str) -> Optional[dict]:
+def submit_moderation_appeal(
+    content_hash: str,
+    appeal_reason: str,
+    user_id: Optional[int] = None,
+) -> Optional[dict]:
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT id FROM moderation_decisions WHERE content_hash = ? ORDER BY id DESC LIMIT 1",
-        (content_hash,),
+        """
+        SELECT id
+        FROM moderation_decisions
+        WHERE content_hash = ?
+          AND ((user_id = ?) OR (user_id IS NULL AND ? IS NULL))
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (content_hash, user_id, user_id),
     ).fetchone()
+
     if not row:
         conn.close()
         return None
+
     conn.execute(
         """
         UPDATE moderation_decisions
-        SET appeal_status = 'beklemede', appeal_reason = ?, appeal_created_at = ?
+        SET appeal_status = 'beklemede',
+            appeal_reason = ?,
+            appeal_created_at = ?
         WHERE id = ?
         """,
         (appeal_reason, datetime.now(timezone.utc).isoformat(), row["id"]),
@@ -918,6 +1059,7 @@ def submit_moderation_appeal(content_hash: str, appeal_reason: str) -> Optional[
     conn.commit()
     conn.close()
     return {"id": row["id"], "appeal_status": "beklemede"}
+
 
 init_db()
 
@@ -1937,6 +2079,37 @@ def register(request: RegisterRequest):
         },
     }
 
+def estimate_source_match_probability(claim_text: str, candidate_text: str) -> int:
+    """İddia ile aday kaynağın konu eşleşmesini kaba bir dilsel sinyalle ölçer.
+
+    Bu değer birincil kaynak olma ihtimali değildir. Yalnızca ilgisiz
+    sonuçları kaynak zincirinden ayıklamak için kullanılır.
+    """
+    # Çok genel kelimeler (haber, bugün, açıklama vb.) eşleşme sinyali olarak
+    # kullanılmamalı; aksi halde Tavily'nin alakasız sonuçları yüksek skor alabiliyor.
+    stop_tokens = {
+        "haber", "haberler", "bugün", "dün", "açıklama", "açıklaması",
+        "son", "sonra", "önce", "gün", "yeni", "olan", "olarak",
+        "ilgili", "hakkında", "konu", "konusu", "türkiye", "türk",
+        "resmi", "resmî", "paylaşım", "paylasim", "sosyal", "medya",
+        "kaynak", "başkan", "bakan", "bakanlık", "devlet", "yıl",
+    }
+    claim_tokens = {
+        token for token in re.findall(r"[\wçğıöşüÇĞİÖŞÜ]+", (claim_text or "").lower())
+        if len(token) >= 4 and token not in stop_tokens
+    }
+    candidate_tokens = {
+        token for token in re.findall(r"[\wçğıöşüÇĞİÖŞÜ]+", (candidate_text or "").lower())
+        if len(token) >= 4 and token not in stop_tokens
+    }
+    if not claim_tokens or not candidate_tokens:
+        return 0
+    overlap = len(claim_tokens & candidate_tokens)
+    # Recall-style oran: aday metnindeki ortak anlamlı kelimeler arttıkça skor yükselir.
+    score = round((overlap / max(1, min(len(claim_tokens), 20))) * 100)
+    return max(0, min(100, score))
+
+
 def analyze_source_chain(
     title: str,
     description: str,
@@ -1997,7 +2170,7 @@ def analyze_source_chain(
     raw_results = []
     
     for q in queries[:2]:
-        results = search_with_tavily(q, max_results=5)
+        results = search_with_tavily(q, max_results=4)
         for r in results:
             url = r.get("url")
             if url and url not in unique_urls:
@@ -2050,7 +2223,7 @@ def analyze_source_chain(
             "date": published,
             "platform": site_name,
             "author": author,
-            "excerpt": item_content[:300]
+            "excerpt": item_content[:500]
         }
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -2106,9 +2279,14 @@ def analyze_source_chain(
        - Resmi kurum/kişi paylaşımıysa ve ilk paylaşım olduğu yüksek ihtimalse yüksek bir skor (%80-%100) ver.
        - Haber sitesi, ikincil aktarıcı veya sadece alıntı yapan bir siteyse daha düşük skor ver.
        - Eğer yeterli kanıt veya tarih bilgisi yoksa veya kesin doğrulanamıyorsa orta/düşük bir olasılık skoru ver.
-    5. Birincil kaynak olarak seçilen adayın detaylarını belirle:
-       - `likely_original_source`: Kurum veya kişi adı (örn. 'Millî Eğitim Bakanlığı', 'Ahmet Yılmaz'). Platform adını (X, Facebook, nsosyal vb.) doğrudan buraya yazma!
-       - `likely_original_author`: Paylaşımı yapan hesabın kullanıcı adı (örn. '@tcmeb', '@ahmetyilmaz'). Eğer kullanıcı adı yoksa boş bırak.
+    5. Her aday için ayrıca "match_probability" (incelenen içerikle konu/iddia eşleşme yüzdesi) belirle.
+       - İddia ile doğrudan aynı olayı, duyuruyu veya metni ele alan kaynaklar yüksek skor almalı.
+       - Sadece aynı genel konuya değinen ama farklı olayları anlatan sonuçlar düşük skor almalı.
+       - Alakasız sonuçlara %20'nin altında skor ver.
+       - Bu değer BİRİNCİL KAYNAK olma ihtimali değildir; yalnızca içerikle eşleşme değeridir.
+    6. Birincil kaynak olarak seçilen adayın detaylarını belirle:
+       - `likely_original_source`: BİRİNCİL PAYLAŞIMI YAPAN HESABIN/KİŞİNİN GÖRÜNÜR ADI (örn. 'Millî Eğitim Bakanlığı', 'Ahmet Yılmaz'). Buraya yalnızca platform adı (X, Facebook, Instagram, NSosyal vb.) YAZMA; haber başlığını da kaynak adı olarak kullanma.
+       - `likely_original_author`: Varsa hesabın kullanıcı adı/handle'ı (örn. '@tcmeb', '@ahmetyilmaz').
        - `likely_original_url`: Bu paylaşımın veya resmi duyurunun tam URL'si (asla domain ana sayfasını vermeyin, tam path olsun, örn: 'https://x.com/tcmeb/status/123456').
        - `likely_original_date`: Paylaşım tarihi.
        - `likely_original_excerpt`: Paylaşım metninden veya duyurudan kısa bir alıntı.
@@ -2120,6 +2298,12 @@ def analyze_source_chain(
       "primary_probability": 92,
       "source_status": "strong_candidate / candidate / uncertain",
       "reasoning": "Neden bu kaynağı ve bu yüzdeyi seçtiğine dair Türkçe açıklama. Kesinlik durumunu belirt.",
+      "likely_original_source": "BİRİNCİL PAYLAŞIMI YAPAN HESABIN/KİŞİNİN GÖRÜNÜR ADI",
+      "likely_original_author": "@kullaniciadi veya boş",
+      "likely_original_url": "Tam paylaşım URL'si",
+      "likely_original_date": "Tarih bilgisi",
+      "likely_original_excerpt": "Kısa alıntı",
+      "likely_original_platform": "Platform adı",
       "evaluated_candidates": [
         {{
           "source": "Temizlenmiş kaynak/kurum/kişi adı (asla sadece X veya Facebook yazma)",
@@ -2128,7 +2312,8 @@ def analyze_source_chain(
           "date": "Tarih bilgisi",
           "url": "Tam paylaşım URL'si (path korunacak)",
           "is_likely_primary": true,
-          "primary_probability": 92
+          "primary_probability": 92,
+          "match_probability": 95
         }}
       ]
     }}
@@ -2139,62 +2324,154 @@ def analyze_source_chain(
         raw_eval = call_llm([{"role": "user", "content": prompt_evaluate}], temperature=0.1)
         data_eval = json.loads(raw_eval)
         
+        evaluated = data_eval.get("evaluated_candidates", [])
+        if not isinstance(evaluated, list):
+            evaluated = []
+
+        # Adayları URL üzerinden gerçek Tavily adaylarıyla eşleştir.
+        evaluated_by_url = {}
+        for item in evaluated:
+            if not isinstance(item, dict):
+                continue
+            item_url = str(item.get("url") or "").strip()
+            if item_url:
+                evaluated_by_url[item_url] = item
+
+        enriched_candidates = []
+        claim_text = f"{title} {description} {body}"
+        for idx, candidate in enumerate(candidates):
+            item = evaluated_by_url.get(candidate.get("url", ""), {})
+            lexical_match = estimate_source_match_probability(
+                claim_text,
+                f"{candidate.get('title', '')} {candidate.get('excerpt', '')}",
+            )
+            llm_match = safe_score(item.get("match_probability"), -1)
+            if llm_match < 0:
+                llm_match = lexical_match
+            else:
+                # LLM'nin tek başına verdiği yüksek skorla alakasız sonuçların
+                # kaynak zincirine girmesini engelle. En az %25 gerçek metin
+                # eşleşmesi zorunlu.
+                llm_match = min(llm_match, max(0, lexical_match))
+            if candidate.get("url") == current_url:
+                llm_match = 100
+
+            primary_probability = safe_score(item.get("primary_probability"), 0)
+            if not primary_probability:
+                primary_probability = safe_score(candidate.get("score"), 0)
+
+            enriched_candidates.append({
+                **candidate,
+                "match_probability": max(0, min(100, llm_match)),
+                "primary_probability": max(0, min(100, primary_probability)),
+                "is_likely_primary": bool(item.get("is_likely_primary", False)),
+                "evaluated_source": str(item.get("source") or "").strip(),
+                "evaluated_author": str(item.get("author") or "").strip(),
+                "evaluated_platform": str(item.get("platform") or "").strip(),
+                "evaluated_date": str(item.get("date") or "").strip(),
+                "evaluated_excerpt": str(item.get("excerpt") or "").strip(),
+            })
+
+        # Kaynak zincirine yalnızca en az %25 gerçek eşleşme sağlayan
+        # adaylar girer. %25'in altındaki sonuçlar kullanıcıya gösterilmez.
+        relevant_candidates = [
+            c for c in enriched_candidates
+            if c.get("match_probability", 0) >= 25
+        ]
+
+        # Mevcut paylaşımın kendisi her zaman ilgili adaydır; içerik eşleşmesi 100'dür.
+        if current_url:
+            current_candidate = next(
+                (c for c in enriched_candidates if c.get("url") == current_url),
+                None,
+            )
+            if current_candidate and current_candidate not in relevant_candidates:
+                relevant_candidates.append(current_candidate)
+
+        relevant_candidates.sort(
+            key=lambda c: (
+                c.get("primary_probability", 0),
+                c.get("match_probability", 0),
+                bool(c.get("date")),
+            ),
+            reverse=True,
+        )
+        # Kullanıcıya gereksiz kalabalık vermemek için en fazla 4 gerçekten
+        # eşleşen aday göster.
+        relevant_candidates = relevant_candidates[:4]
+
+        if not relevant_candidates:
+            relevant_candidates = [
+                {
+                    "title": title or "Mevcut paylaşım",
+                    "url": current_url or "",
+                    "date": current_date or "",
+                    "platform": current_site or (get_domain(current_url) if current_url else ""),
+                    "author": "",
+                    "excerpt": body[:500],
+                    "match_probability": 100 if current_url else 0,
+                    "primary_probability": 0,
+                    "is_likely_primary": False,
+                    "evaluated_source": "",
+                    "evaluated_author": "",
+                    "evaluated_platform": "",
+                    "evaluated_date": "",
+                    "evaluated_excerpt": "",
+                }
+            ]
+
+        # Birincil aday: LLM'nin seçimi ilgili adaylar arasındaysa onu kullan;
+        # değilse en yüksek birincil olasılıklı ilgili kaynağa düş.
+        primary_source_index = data_eval.get("primary_source_index", -1)
+        selected = None
+        if isinstance(primary_source_index, int) and 0 <= primary_source_index < len(candidates):
+            selected_url = candidates[primary_source_index].get("url", "")
+            selected = next(
+                (c for c in relevant_candidates if c.get("url") == selected_url),
+                None,
+            )
+        if selected is None:
+            selected = max(
+                relevant_candidates,
+                key=lambda c: (c.get("primary_probability", 0), c.get("match_probability", 0)),
+            )
+
+        # Ana kaynak alanlarını LLM boş bıraktığında gerçek aday metadata'sından doldur.
+        likely_original_author = str(data_eval.get("likely_original_author") or selected.get("evaluated_author") or selected.get("author") or "").strip()
+        likely_original_source = str(data_eval.get("likely_original_source") or selected.get("evaluated_source") or likely_original_author or selected.get("title") or "Birincil kaynak adayı").strip()
+        likely_original_url = str(data_eval.get("likely_original_url") or selected.get("url") or "").strip()
+        likely_original_date = str(data_eval.get("likely_original_date") or selected.get("evaluated_date") or selected.get("date") or "").strip()
+        likely_original_excerpt = str(data_eval.get("likely_original_excerpt") or selected.get("evaluated_excerpt") or selected.get("excerpt") or "").strip()
+        likely_original_platform = str(data_eval.get("likely_original_platform") or selected.get("evaluated_platform") or selected.get("platform") or "").strip()
+
         primary_prob = safe_score(data_eval.get("primary_probability"), 0)
+        if primary_prob <= 0:
+            primary_prob = safe_score(selected.get("primary_probability"), 0)
+
         status = str(data_eval.get("source_status") or "uncertain").strip()
-        reasoning = str(data_eval.get("reasoning") or "Analiz tamamlandı.").strip()
-        
-        # Primary item details
-        likely_original_source = ""
-        likely_original_author = ""
-        likely_original_url = ""
-        likely_original_date = ""
-        likely_original_excerpt = ""
-        likely_original_platform = ""
-        
-        idx = data_eval.get("primary_source_index", -1)
-        if 0 <= idx < len(candidates):
-            prim_c = candidates[idx]
-            likely_original_source = str(data_eval.get("likely_original_source") or prim_c.get("title") or "").strip()
-            likely_original_author = str(data_eval.get("likely_original_author") or prim_c.get("author") or "").strip()
-            likely_original_url = str(data_eval.get("likely_original_url") or prim_c.get("url") or "").strip()
-            likely_original_date = str(data_eval.get("likely_original_date") or prim_c.get("date") or "").strip()
-            likely_original_excerpt = str(data_eval.get("likely_original_excerpt") or prim_c.get("excerpt") or "").strip()
-            likely_original_platform = str(data_eval.get("likely_original_platform") or prim_c.get("platform") or "").strip()
+        if primary_prob >= 75:
+            status = "strong_candidate"
+        elif primary_prob >= 50:
+            status = "candidate"
         else:
-            likely_original_source = str(data_eval.get("likely_original_source") or "").strip()
-            likely_original_author = str(data_eval.get("likely_original_author") or "").strip()
-            likely_original_url = str(data_eval.get("likely_original_url") or "").strip()
-            likely_original_date = str(data_eval.get("likely_original_date") or "").strip()
-            likely_original_excerpt = str(data_eval.get("likely_original_excerpt") or "").strip()
-            likely_original_platform = str(data_eval.get("likely_original_platform") or "").strip()
+            status = "uncertain"
+
+        reasoning = str(data_eval.get("reasoning") or "İçerikle eşleşen aday kaynaklar filtrelendi ve birincil aday değerlendirildi.").strip()
 
         source_chain_items = []
-        for item in data_eval.get("evaluated_candidates", []):
+        for candidate in relevant_candidates:
             source_chain_items.append(
                 SourceChainItem(
-                    source=str(item.get("source") or "").strip(),
-                    url=str(item.get("url") or "").strip(),
-                    date=str(item.get("date") or "").strip(),
-                    platform=str(item.get("platform") or "").strip(),
-                    author=str(item.get("author") or "").strip(),
-                    is_likely_primary=bool(item.get("is_likely_primary")),
-                    primary_probability=safe_score(item.get("primary_probability"), 0),
+                    source=(candidate.get("evaluated_source") or candidate.get("author") or candidate.get("title") or "Kaynak"),
+                    url=candidate.get("url") or "",
+                    date=candidate.get("evaluated_date") or candidate.get("date") or "",
+                    platform=candidate.get("evaluated_platform") or candidate.get("platform") or "",
+                    author=candidate.get("evaluated_author") or candidate.get("author") or "",
+                    is_likely_primary=(candidate.get("url") == selected.get("url")),
+                    primary_probability=safe_score(candidate.get("primary_probability"), 0),
+                    match_probability=safe_score(candidate.get("match_probability"), 0),
                 )
             )
-            
-        if not source_chain_items:
-            for c in candidates:
-                source_chain_items.append(
-                    SourceChainItem(
-                        source=c.get("title") or "Aday",
-                        url=c.get("url") or "",
-                        date=c.get("date") or "",
-                        platform=c.get("platform") or "",
-                        author=c.get("author") or "",
-                        is_likely_primary=False,
-                        primary_probability=0
-                    )
-                )
 
         dur_eval = time.time() - t0_eval
         print(f"[TruthLens] Source chain LLM eval: {dur_eval:.2f}s")
@@ -2222,13 +2499,17 @@ def analyze_source_chain(
         for c in candidates:
             source_chain_items.append(
                 SourceChainItem(
-                    source=c.get("title") or "Aday",
+                    source=c.get("author") or c.get("title") or "Aday",
                     url=c.get("url") or "",
                     date=c.get("date") or "",
                     platform=c.get("platform") or "",
                     author=c.get("author") or "",
                     is_likely_primary=False,
-                    primary_probability=0
+                    primary_probability=0,
+                    match_probability=estimate_source_match_probability(
+                        f"{title} {description} {body}",
+                        f"{c.get('title', '')} {c.get('excerpt', '')}",
+                    ),
                 )
             )
         return SourceAnalysis(
@@ -2280,40 +2561,73 @@ def me(request: Request):
     return {"user": user}
 
 @app.post("/moderation/appeal")
-def moderation_appeal(payload: dict):
-    """
-    Kullanıcı 'gizle_ve_incele' veya 'kaldirma_oner' kararına itiraz edebilir.
-    Bu, otomatik kararların tek yönlü olmamasını sağlayan şeffaflık mekanizmasıdır.
-    """
+def moderation_appeal(payload: dict, request: Request):
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="İtiraz göndermek için giriş yapmalısın.",
+        )
+
     content_hash = str(payload.get("content_hash", "")).strip()
     appeal_reason = str(payload.get("appeal_reason", "")).strip()
     if not content_hash or not appeal_reason:
-        raise HTTPException(status_code=400, detail="content_hash ve appeal_reason gerekli.")
+        raise HTTPException(
+            status_code=400,
+            detail="content_hash ve appeal_reason gerekli.",
+        )
 
-    updated = submit_moderation_appeal(content_hash, appeal_reason)
+    updated = submit_moderation_appeal(
+        content_hash,
+        appeal_reason,
+        user_id=user["id"],
+    )
     if not updated:
-        raise HTTPException(status_code=404, detail="Bu içerik için bir moderasyon kararı bulunamadı.")
+        raise HTTPException(
+            status_code=404,
+            detail="Bu içerik için hesabına ait bir moderasyon kararı bulunamadı.",
+        )
+
     return {"status": "ok", **updated}
 
 
 @app.get("/moderation/history")
-def moderation_history(limit: int = 50):
-    """Şeffaflık paneli: son moderasyon kararlarının denetlenebilir kaydı."""
+def moderation_history(request: Request, limit: int = 50):
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Oturum doğrulanamadı.")
+
     conn = get_db_connection()
     rows = conn.execute(
         """
-        SELECT content_hash, action, aggregate_risk, reason, created_at, appeal_status, appeal_reason
+        SELECT
+            content_hash,
+            action,
+            aggregate_risk,
+            reason,
+            created_at,
+            appeal_status,
+            appeal_reason,
+            appeal_created_at
         FROM moderation_decisions
-        ORDER BY id DESC LIMIT ?
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT ?
         """,
-        (max(1, min(limit, 200)),),
+        (user["id"], max(1, min(limit, 100))),
     ).fetchall()
     conn.close()
+
     return {
         "items": [dict(r) for r in rows],
         "action_distribution": {
             action: sum(1 for r in rows if r["action"] == action)
-            for action in {"izin_ver", "etiketle", "gizle_ve_incele", "kaldirma_oner"}
+            for action in {
+                "izin_ver",
+                "etiketle",
+                "gizle_ve_incele",
+                "kaldirma_oner",
+            }
         },
     }
 
@@ -2419,17 +2733,51 @@ def analyze(request_body: AnalysisRequest, request: Request):
         if future_source:
             source_analysis = future_source.result()
 
+    # Kaynak zincirindeki doğrulanmış adayları ana destekleyen kaynaklar
+    # bölümüne de aktar. Böylece alt bölüm boş kalmaz; ancak gerçek bir
+    # çelişki kanıtı yoksa yapay bir "çelişkili kaynak" UYDURULMAZ.
+    if url and isinstance(source_analysis, SourceAnalysis):
+        chain = source_analysis.source_chain or []
+        if not result.supporting_sources and chain:
+            support_candidates = [c for c in chain if c.match_probability >= 25]
+            support_candidates = sorted(
+                support_candidates,
+                key=lambda c: (c.is_likely_primary, c.primary_probability, c.match_probability),
+                reverse=True,
+            )[:2]
+            result = result.model_copy(update={
+                "supporting_sources": [
+                    Source(
+                        title=(c.source or "Birincil kaynak"),
+                        url=c.url,
+                        relevance=f"İçerikle eşleşme %{c.match_probability}; birincil olasılık %{c.primary_probability}.",
+                        reliability=80 if c.is_likely_primary else 70,
+                        reliability_reason="Kaynak zincirinde içerikle en az %25 eşleşen aday.",
+                    )
+                    for c in support_candidates
+                    if c.url
+                ]
+            })
+
+    content_hash = analysis_cache_key(analyzed_content, source_url)
     result = result.model_copy(update={
+        "content_hash": content_hash,
         "image_ai_probability": image_ai_probability,
         "image_is_ai": image_is_ai,
         "image_analysis_available": image_analysis_available,
         "source_analysis": source_analysis if isinstance(source_analysis, SourceAnalysis) else SourceAnalysis(**source_analysis),
     })
 
-    content_hash = analysis_cache_key(analyzed_content, source_url)
-    log_moderation_decision(content_hash, result.moderation)
+    result = result.model_copy(update={
+        "verification": compute_truthlens_verification(result, has_source_url=bool(source_url)),
+    })
 
     user = get_current_user_from_request(request)
+    log_moderation_decision(
+        content_hash,
+        result.moderation,
+        user_id=user["id"] if user else None,
+    )
     if user:
         result_payload = json.loads(result.model_dump_json())
         save_analysis_history(user["id"], content_hash, source_url, result_payload)

@@ -4,8 +4,8 @@ Kullanım (kendi ortamınızda, API sunucunuz ayaktayken):
     python3 main.py                     # ayrı terminalde sunucuyu başlatın
     python3 evaluate_moderation.py      # bu scripti çalıştırın
 
-Çıktı: eval_report.md dosyası -> Teknik rapor Bölüm 3.2'ye doğrudan
-yapıştırılabilecek precision/recall/F1 tablosu ve karışıklık matrisi üretir.
+Çıktı: eval_report.md dosyası -> küratörlü moderasyon politika kabul/regresyon testi
+raporu üretir. Bu sonuç genel model doğruluğu değildir.
 
 Bu script main.py'yi import ETMEZ; gerçek HTTP isteği atar. Böylece
 ölçtüğünüz şey gerçekten uçtan uca çalışan sisteminizdir (LLM dahil),
@@ -39,6 +39,8 @@ def call_analyze(text: str) -> str:
 def confusion_matrix(y_true, y_pred, labels):
     matrix = {t: {p: 0 for p in labels} for t in labels}
     for t, p in zip(y_true, y_pred):
+        if t not in matrix or p not in labels:
+            continue
         matrix[t][p] += 1
     return matrix
 
@@ -58,15 +60,18 @@ def precision_recall_f1(matrix, labels):
 
 def main():
     items = load_dataset()
-    y_true, y_pred, mismatches = [], [], []
+    y_true, y_pred, mismatches, errors = [], [], [], []
 
     print(f"{len(items)} örnek üzerinde /analyze çağrılıyor...")
     for i, item in enumerate(items, 1):
         try:
             predicted = call_analyze(item["text"])
         except Exception as e:
+            errors.append((item["id"], str(e)))
             print(f"  [{i}/{len(items)}] HATA ({item['id']}): {e}")
-            predicted = "HATA"
+            mismatches.append((item["id"], item["text"], item["expected_action"], "HATA"))
+            time.sleep(0.3)
+            continue
         y_true.append(item["expected_action"])
         y_pred.append(predicted)
         match = "OK" if predicted == item["expected_action"] else "FARK"
@@ -77,12 +82,15 @@ def main():
 
     matrix = confusion_matrix(y_true, y_pred, ACTIONS)
     rows = precision_recall_f1(matrix, ACTIONS)
-    accuracy = sum(1 for t, p in zip(y_true, y_pred) if t == p) / len(y_true)
+    agreement = sum(1 for t, p in zip(y_true, y_pred) if t == p) / len(y_true) if y_true else 0.0
 
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
-        f.write("# Moderasyon Pipeline Değerlendirme Raporu\n\n")
-        f.write(f"- Toplam örnek: {len(items)}\n")
-        f.write(f"- Genel doğruluk (accuracy): **{accuracy:.1%}**\n\n")
+        f.write("# Moderasyon Politika Kabul / Regresyon Testi Raporu\n\n")
+        f.write(f"- Toplam senaryo: {len(items)}\n")
+        f.write(f"- Başarılı API yanıtı: {len(y_true)}\n")
+        f.write(f"- API hatası: {len(errors)}\n")
+        f.write(f"- Beklenen aksiyon eşleşmesi: **{agreement:.1%}**\n\n")
+        f.write("> Bu küratörlü senaryo seti genel model doğruluğu veya gerçek dünya genelleme benchmarkı değildir; moderasyon politikasının uçtan uca beklenen aksiyona bağlanmasını sınar.\n\n")
         f.write("## Sınıf Bazlı Precision / Recall / F1\n\n")
         f.write("| Aksiyon | Precision | Recall | F1 | TP | FP | FN |\n")
         f.write("|---|---|---|---|---|---|---|\n")
@@ -100,8 +108,16 @@ def main():
         else:
             f.write("Yok — tüm örnekler beklenen aksiyonla eşleşti.\n")
 
+        f.write("\n## API Hataları\n\n")
+        if errors:
+            for error_id, error_text in errors:
+                f.write(f"- **{error_id}**: {error_text}\n")
+        else:
+            f.write("Yok.\n")
+
     print(f"\nRapor yazıldı: {REPORT_PATH}")
-    print(f"Genel doğruluk: {accuracy:.1%}")
+    print(f"Politika aksiyonu eşleşmesi: {agreement:.1%}")
+    print(f"API hatası: {len(errors)}")
 
 
 if __name__ == "__main__":

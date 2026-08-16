@@ -170,6 +170,8 @@ export default function Home() {
   const [appealReason, setAppealReason] = useState("");
   const [appealSent, setAppealSent] = useState(false);
   const [appealSending, setAppealSending] = useState(false);
+  // URL analizinde yüksek riskli içerik ilk etapta gizlenir; kullanıcı isterse görüntülemeyi açar.
+  const [urlModerationOverride, setUrlModerationOverride] = useState(false);
   const [moderationHistory, setModerationHistory] = useState<ModerationHistoryItem[]>([]);
   const [moderationHistoryLoading, setModerationHistoryLoading] = useState(false);
   const [moderationHistoryError, setModerationHistoryError] = useState("");
@@ -178,7 +180,6 @@ export default function Home() {
   const safetyScore = result?.score ?? 0;
   const riskTrend = user ? Math.max(0, Math.min(100, Math.round(100 - safetyScore))) : 0;
   const trustQuality = user ? (result?.score ?? Math.round((history.length * 100) / Math.max(history.length + 1, 1))) : 0;
-  const rewriteCount = user ? history.length : 0;
   const hasSourceAnalysis = Boolean(
     result?.source_analysis &&
       ((result.source_analysis.likely_original_source && result.source_analysis.likely_original_source.length > 0) ||
@@ -201,6 +202,10 @@ export default function Home() {
         setUser(meData.user);
         await fetchHistory(activeToken);
         await fetchModerationHistory(activeToken);
+      } else {
+        window.localStorage.removeItem("truthlens_token");
+        setToken(null);
+        setUser(null);
       }
     } catch (err) {
       console.error("Kullanıcı profili alınamadı", err);
@@ -223,6 +228,14 @@ export default function Home() {
       console.error("Geçmiş alınamadı", err);
     }
   }
+  useEffect(() => {
+    const storedToken = window.localStorage.getItem("truthlens_token");
+    if (storedToken) {
+      setToken(storedToken);
+      void fetchCurrentUser(storedToken);
+    }
+  }, []);
+
   async function fetchModerationHistory(activeToken: string) {
     setModerationHistoryLoading(true);
     setModerationHistoryError("");
@@ -411,6 +424,7 @@ export default function Home() {
     setResult(null);
     setAppealReason("");
     setAppealSent(false);
+    setUrlModerationOverride(false);
 
     try {
       const response = await fetch(
@@ -503,6 +517,7 @@ export default function Home() {
     setError("");
     setResult(null);
     setSourceChainOpen(false);
+    setUrlModerationOverride(false);
   }
 
   return (
@@ -804,10 +819,10 @@ export default function Home() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
             <div className="mb-3 flex items-center gap-2">
               <span className="text-lg"></span>
-              <span className="text-sm font-semibold text-slate-300">Yönetici Konsolu</span>
+              <span className="text-sm font-semibold text-slate-300">İnsan Denetimi</span>
             </div>
             <p className="text-sm leading-6 text-slate-500">
-              Canlı trend, risk ve güven güvenilirliği istatistikleri sunar.
+              Riskli içeriklerde otomatik silme yerine insan incelemesini öne çıkarır.
             </p>
           </div>
 
@@ -965,10 +980,10 @@ export default function Home() {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <div className="text-xs font-bold uppercase tracking-[0.28em] text-slate-500">
-                Canlı İstihbarat
+                Sosyal Güven Metrikleri
               </div>
               <h2 className="mt-2 text-2xl font-bold text-white">
-                NSosyal Güven Konsolu
+                TruthLens Sosyal Güven Konsolu
               </h2>
             </div>
             <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-bold uppercase text-emerald-300">
@@ -992,37 +1007,37 @@ export default function Home() {
 
             <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
-                Bot Etkinliği
+                İnsan Denetimi
               </div>
-              <div className="mt-2 text-3xl font-bold text-red-300">
-                {user ? "Düşük" : "--"}
+              <div className="mt-2 text-3xl font-bold text-amber-300">
+                {result?.moderation?.requires_human_review ? "Gerekli" : result ? "Gerekmiyor" : "--"}
               </div>
               <div className="mt-1 text-xs text-slate-600">
-                {user ? "Temassız ağ sinyali" : "Kullanıcı bağlamı yok"}
+                {result ? "Son analizdeki moderasyon kararı" : "Analiz bekleniyor"}
               </div>
             </div>
 
             <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
-                Güven Gücü
+                Son Analiz Güven Skoru
               </div>
               <div className="mt-2 text-3xl font-bold text-emerald-300">
-                {user ? `${trustQuality}%` : "--"}
+                {result ? `${trustQuality}%` : "--"}
               </div>
               <div className="mt-1 text-xs text-slate-600">
-                {user ? "Kullanıcı akışı güveni" : "Oturum bekleniyor"}
+                {result ? "Son analizdeki gerçeklik skoru" : "Analiz bekleniyor"}
               </div>
             </div>
 
             <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
-                Yeniden Yazım
+                Kayıtlı Analiz
               </div>
               <div className="mt-2 text-3xl font-bold text-blue-300">
-                {user ? rewriteCount : "--"}
+                {user ? history.length : "--"}
               </div>
               <div className="mt-1 text-xs text-slate-600">
-                {user ? "Kayıtlı tarih" : "Kayıtlı kullanıcı yok"}
+                {user ? "Bu hesapta saklanan analiz" : "Oturum bekleniyor"}
               </div>
             </div>
 
@@ -1116,7 +1131,51 @@ export default function Home() {
 
         {/* RESULT */}
         {result && !loading && (
-          <section className="mt-8 space-y-6">
+          <section className={`relative mt-8 space-y-6 ${
+            mode === "url" &&
+            result.moderation &&
+            (result.moderation.action === "gizle_ve_incele" || result.moderation.action === "kaldirma_oner") &&
+            !urlModerationOverride
+              ? "overflow-hidden"
+              : ""
+          }`}>
+
+            {mode === "url" &&
+              result.moderation &&
+              (result.moderation.action === "gizle_ve_incele" || result.moderation.action === "kaldirma_oner") &&
+              !urlModerationOverride && (
+                <div className="absolute inset-0 z-20 flex min-h-[520px] items-start justify-center bg-slate-950/90 p-6 pt-10 backdrop-blur-sm">
+                  <div className="sticky top-8 w-full max-w-2xl rounded-2xl border border-amber-500/30 bg-slate-900 p-7 text-center shadow-2xl">
+                    <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-amber-500/30 bg-amber-500/10 text-2xl">⚠️</div>
+                    <div className="mt-4 text-xs font-bold uppercase tracking-[0.22em] text-amber-400">TruthLens içerik güvenliği</div>
+                    <h2 className="mt-2 text-2xl font-bold text-white">Bu içerik geçici olarak gizlendi</h2>
+                    <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-slate-400">
+                      TruthLens, URL'den alınan gönderide inceleme gerektiren bir risk tespit etti. İçeriği görüntülemek için aşağıdaki seçeneği kullanabilirsin.
+                    </p>
+                    <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950 p-4 text-left">
+                      <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Önerilen işlem</div>
+                      <div className="mt-2 font-semibold text-white">{result.moderation.action_label}</div>
+                      <div className="mt-2 text-sm leading-6 text-slate-400">{result.moderation.reason}</div>
+                    </div>
+                    <div className="mt-5 flex flex-col justify-center gap-3 sm:flex-row">
+                      <button type="button" onClick={() => setUrlModerationOverride(true)} className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-500">Yine de görüntüle</button>
+                      <button type="button" onClick={() => setResult(null)} className="rounded-xl border border-slate-700 bg-slate-950 px-5 py-3 text-sm font-semibold text-slate-300 transition hover:border-slate-500">İçeriği gizli tut</button>
+                    </div>
+                    {result.moderation.requires_human_review && (
+                      <div className="mt-4 text-xs text-slate-500">İnsan incelemesi öneriliyor. Otomatik silme yapılmaz.</div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+            <div className={
+              mode === "url" &&
+              result.moderation &&
+              (result.moderation.action === "gizle_ve_incele" || result.moderation.action === "kaldirma_oner") &&
+              !urlModerationOverride
+                ? "pointer-events-none select-none blur-sm"
+                : ""
+            }>
 
             {/* SCORE */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900 p-8 text-center">
@@ -1131,7 +1190,7 @@ export default function Home() {
                     className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs font-bold text-emerald-300"
                   >
                     <span aria-hidden="true">✓</span>
-                    TruthLens doğrulandı
+                    Kanıt kapsamı tamamlandı
                   </span>
                 )}
               </div>
@@ -1407,7 +1466,7 @@ export default function Home() {
                     <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 flex flex-col justify-between">
                       <div>
                         <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          BİRİNCİL KAYNAK OLMA İHTİMALİ
+                          BİRİNCİL KAYNAK ADAY SKORU
                         </div>
                         <div className="mt-2 text-3xl font-extrabold text-emerald-400">
                           {result.source_analysis.source_probability ?? 0}%
@@ -1614,6 +1673,7 @@ export default function Home() {
 
             </Card>
 
+            </div>
           </section>
         )}
 
@@ -1697,10 +1757,10 @@ export default function Home() {
                         <div className="flex items-center gap-2">
                           {post.verified_by_truthlens && (
                             <span
-                              title="Bu paylaşım TruthLens tarafından tam analizden geçirilerek doğrulandı."
+                              title="Bu paylaşım TruthLens analizinden geçti; sonuç kesin doğruluk garantisi değildir."
                               className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold text-emerald-300"
                             >
-                              ✓ TruthLens doğrulandı
+                              ✓ Kanıt kapsamı tamamlandı
                             </span>
                           )}
                           <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-300">

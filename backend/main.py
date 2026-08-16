@@ -7,7 +7,7 @@ import uuid
 import threading
 import concurrent.futures
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 from urllib.parse import urljoin
@@ -308,8 +308,8 @@ def compute_truthlens_verification(result: AnalysisResponse, has_source_url: boo
 
     return VerificationBadge(
         verified=True,
-        label="TruthLens tarafından doğrulandı",
-        short_label="Doğrulandı",
+        label="TruthLens kanıt kapsamı tamamlandı — kesin doğruluk garantisi değildir",
+        short_label="Kanıt kapsamı tamamlandı",
         reasons=[
             f"Doğruluk: {result.result} · gerçeklik skoru {result.score}/100.",
             f"Güncellik/geçerlilik: {result.validity} · zaman değerlendirmesi: {result.time_validity}.",
@@ -964,9 +964,15 @@ def get_current_user_from_request(request: Request) -> Optional[dict]:
         return None
 
     conn = get_db_connection()
+    now = datetime.now(timezone.utc).isoformat()
     row = conn.execute(
-        "SELECT u.id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?",
-        (token,),
+        """
+        SELECT u.id, u.name, u.email
+        FROM sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.token = ? AND s.expires_at > ?
+        """,
+        (token, now),
     ).fetchone()
     conn.close()
 
@@ -2085,13 +2091,22 @@ def estimate_source_match_probability(claim_text: str, candidate_text: str) -> i
     Bu değer birincil kaynak olma ihtimali değildir. Yalnızca ilgisiz
     sonuçları kaynak zincirinden ayıklamak için kullanılır.
     """
+    # Çok genel kelimeler (haber, bugün, açıklama vb.) eşleşme sinyali olarak
+    # kullanılmamalı; aksi halde Tavily'nin alakasız sonuçları yüksek skor alabiliyor.
+    stop_tokens = {
+        "haber", "haberler", "bugün", "dün", "açıklama", "açıklaması",
+        "son", "sonra", "önce", "gün", "yeni", "olan", "olarak",
+        "ilgili", "hakkında", "konu", "konusu", "türkiye", "türk",
+        "resmi", "resmî", "paylaşım", "paylasim", "sosyal", "medya",
+        "kaynak", "başkan", "bakan", "bakanlık", "devlet", "yıl",
+    }
     claim_tokens = {
         token for token in re.findall(r"[\wçğıöşüÇĞİÖŞÜ]+", (claim_text or "").lower())
-        if len(token) >= 4
+        if len(token) >= 4 and token not in stop_tokens
     }
     candidate_tokens = {
         token for token in re.findall(r"[\wçğıöşüÇĞİÖŞÜ]+", (candidate_text or "").lower())
-        if len(token) >= 4
+        if len(token) >= 4 and token not in stop_tokens
     }
     if not claim_tokens or not candidate_tokens:
         return 0
@@ -2332,14 +2347,18 @@ def analyze_source_chain(
         claim_text = f"{title} {description} {body}"
         for idx, candidate in enumerate(candidates):
             item = evaluated_by_url.get(candidate.get("url", ""), {})
+            lexical_match = estimate_source_match_probability(
+                claim_text,
+                f"{candidate.get('title', '')} {candidate.get('excerpt', '')}",
+            )
             llm_match = safe_score(item.get("match_probability"), -1)
             if llm_match < 0:
-                # LLM eşleşme skoru dönmezse, ilgisiz sonuçları azaltmak için
-                # deterministik kelime örtüşmesi kullanılır.
-                llm_match = estimate_source_match_probability(
-                    claim_text,
-                    f"{candidate.get('title', '')} {candidate.get('excerpt', '')}",
-                )
+                llm_match = lexical_match
+            else:
+                # LLM'nin tek başına verdiği yüksek skorla alakasız sonuçların
+                # kaynak zincirine girmesini engelle. En az %25 gerçek metin
+                # eşleşmesi zorunlu.
+                llm_match = min(llm_match, max(0, lexical_match))
             if candidate.get("url") == current_url:
                 llm_match = 100
 
@@ -2359,10 +2378,11 @@ def analyze_source_chain(
                 "evaluated_excerpt": str(item.get("excerpt") or "").strip(),
             })
 
-        # Yalnızca içerikle en az %20 eşleşen kaynaklar zincire girer.
+        # Kaynak zincirine yalnızca en az %25 gerçek eşleşme sağlayan
+        # adaylar girer. %25'in altındaki sonuçlar kullanıcıya gösterilmez.
         relevant_candidates = [
             c for c in enriched_candidates
-            if c.get("match_probability", 0) >= 20
+            if c.get("match_probability", 0) >= 25
         ]
 
         # Mevcut paylaşımın kendisi her zaman ilgili adaydır; içerik eşleşmesi 100'dür.
@@ -2382,8 +2402,9 @@ def analyze_source_chain(
             ),
             reverse=True,
         )
-        # Kullanıcıya gereksiz kalabalık vermemek için en fazla 6 ilgili aday.
-        relevant_candidates = relevant_candidates[:6]
+        # Kullanıcıya gereksiz kalabalık vermemek için en fazla 4 gerçekten
+        # eşleşen aday göster.
+        relevant_candidates = relevant_candidates[:4]
 
         if not relevant_candidates:
             relevant_candidates = [
@@ -2520,7 +2541,7 @@ def login(request: LoginRequest):
 
     token = create_token()
     created_at = datetime.now(timezone.utc).isoformat()
-    expires_at = created_at
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
     conn.execute(
         "INSERT INTO sessions (user_id, token, created_at, expires_at) VALUES (?, ?, ?, ?)",
         (row["id"], token, created_at, expires_at),
@@ -2718,6 +2739,32 @@ def analyze(request_body: AnalysisRequest, request: Request):
         if future_source:
             source_analysis = future_source.result()
 
+    # Kaynak zincirindeki doğrulanmış adayları ana destekleyen kaynaklar
+    # bölümüne de aktar. Böylece alt bölüm boş kalmaz; ancak gerçek bir
+    # çelişki kanıtı yoksa yapay bir "çelişkili kaynak" UYDURULMAZ.
+    if url and isinstance(source_analysis, SourceAnalysis):
+        chain = source_analysis.source_chain or []
+        if not result.supporting_sources and chain:
+            support_candidates = [c for c in chain if c.match_probability >= 25]
+            support_candidates = sorted(
+                support_candidates,
+                key=lambda c: (c.is_likely_primary, c.primary_probability, c.match_probability),
+                reverse=True,
+            )[:2]
+            result = result.model_copy(update={
+                "supporting_sources": [
+                    Source(
+                        title=(c.source or "Birincil kaynak"),
+                        url=c.url,
+                        relevance=f"İçerikle eşleşme %{c.match_probability}; birincil olasılık %{c.primary_probability}.",
+                        reliability=80 if c.is_likely_primary else 70,
+                        reliability_reason="Kaynak zincirinde içerikle en az %25 eşleşen aday.",
+                    )
+                    for c in support_candidates
+                    if c.url
+                ]
+            })
+
     content_hash = analysis_cache_key(analyzed_content, source_url)
     result = result.model_copy(update={
         "content_hash": content_hash,
@@ -2732,6 +2779,10 @@ def analyze(request_body: AnalysisRequest, request: Request):
     })
 
     user = get_current_user_from_request(request)
+    if not user and result.moderation.appeal_eligible:
+        result = result.model_copy(update={
+            "moderation": result.moderation.model_copy(update={"appeal_eligible": False}),
+        })
     log_moderation_decision(
         content_hash,
         result.moderation,
@@ -2789,30 +2840,28 @@ def bluesky_status():
 
 @app.post("/demo-feed/analyze")
 def demo_feed_analyze(payload: dict):
+    """Feed içeriğini gerçek analiz motorundan geçirir; skorlar istemciden kabul edilmez."""
     content = str(payload.get("content", "")).strip()
     if not content:
         raise HTTPException(status_code=400, detail="Analiz edilecek içerik gerekli.")
 
+    analysis = run_analysis(content)
+    toxicity = analysis.toxicity.model_dump()
     post = {
         "id": payload.get("id") or f"demo-{uuid.uuid4().hex[:8]}",
         "author": payload.get("author") or "demo_user",
         "handle": payload.get("handle") or "@demo_user",
         "content": content,
         "tag": payload.get("tag") or "Genel",
-        "truthlens_score": max(0, min(100, int(payload.get("truthlens_score", 60)))),
-        "manipulation": max(0, min(100, int(payload.get("manipulation", 42)))),
-        "clickbait": max(0, min(100, int(payload.get("clickbait", 31)))),
-        "emotion": payload.get("emotion") or "Nötr",
-        "risk_level": payload.get("risk_level") or "Orta",
-        "reason": payload.get("reason") or "Bağlam ve risk değerlendirmesi hazırlandı.",
-        "toxicity": payload.get("toxicity") or {
-            "insult": 0,
-            "bullying": 0,
-            "hate_speech": 0,
-            "targeted_person_or_group": "Genel",
-            "risk_level": "Düşük",
-            "context_note": "Bağlam değerlendirmesi hazırlandı."
-        },
+        "truthlens_score": analysis.score,
+        "misinformation_risk": max(0, min(100, 100 - analysis.score)),
+        "manipulation": analysis.manipulation,
+        "clickbait": analysis.clickbait,
+        "emotion": analysis.emotion,
+        "risk_level": toxicity.get("risk_level", "Belirsiz"),
+        "reason": analysis.explanation,
+        "toxicity": toxicity,
+        "analysis_source": "TruthLens gerçek analiz motoru",
     }
     return {"post": post, "summary": summarize_demo_feed([post])}
 
