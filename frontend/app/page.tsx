@@ -98,6 +98,27 @@ interface AnalysisResult {
   };
 }
 
+interface NsosyalModerationCheck {
+  adapter: {
+    platform: string;
+    status: string;
+    api_version: string;
+    contract: { input: string; output: string; irreversible_actions: string };
+  };
+  content: string;
+  content_hash: string;
+  toxicity: ToxicityResult;
+  moderation: ModerationResult;
+  verification: VerificationBadge;
+  publish: {
+    allowed: boolean;
+    state: string;
+    label_required: boolean;
+    human_review_required: boolean;
+    message: string;
+  };
+}
+
 interface FeedPost {
   id: string;
   author: string;
@@ -175,6 +196,13 @@ export default function Home() {
   const [moderationHistory, setModerationHistory] = useState<ModerationHistoryItem[]>([]);
   const [moderationHistoryLoading, setModerationHistoryLoading] = useState(false);
   const [moderationHistoryError, setModerationHistoryError] = useState("");
+  const [nsosyalDraft, setNsosyalDraft] = useState("");
+  const [nsosyalCheck, setNsosyalCheck] = useState<NsosyalModerationCheck | null>(null);
+  const [nsosyalChecking, setNsosyalChecking] = useState(false);
+  const [nsosyalPublished, setNsosyalPublished] = useState(false);
+  const [socialView, setSocialView] = useState<"home" | "liked" | "profile" | "settings">("home");
+  const [likedPostIds, setLikedPostIds] = useState<Set<string>>(new Set());
+  const [socialActionStatus, setSocialActionStatus] = useState("");
   const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
   const safetyScore = result?.score ?? 0;
@@ -412,6 +440,136 @@ export default function Home() {
     } finally {
       setFeedRefreshing(false);
     }
+  }
+
+  async function checkNsosyalPost() {
+    const draft = nsosyalDraft.trim();
+    if (!draft) {
+      setError("NSosyal gönderisi için bir metin yaz.");
+      return;
+    }
+
+    setNsosyalChecking(true);
+    setNsosyalCheck(null);
+    setNsosyalPublished(false);
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE_URL}/nsosyal/moderation-check`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ content: draft }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.detail || "NSosyal moderasyon ön kontrolü başarısız.");
+      setNsosyalCheck(data as NsosyalModerationCheck);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "NSosyal moderasyon ön kontrolü başarısız.");
+    } finally {
+      setNsosyalChecking(false);
+    }
+  }
+
+  async function publishToBluesky() {
+    if (!nsosyalCheck?.publish.allowed) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/social/create-post`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: nsosyalCheck.content }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.detail || "Bluesky gönderisi oluşturulamadı.");
+      setSocialActionStatus("Gönderi Bluesky’ye başarıyla gönderildi.");
+      setNsosyalPublished(true);
+    } catch (err) {
+      setSocialActionStatus(err instanceof Error ? err.message : "Bluesky gönderisi oluşturulamadı.");
+    }
+  }
+
+  function publishNsosyalDemoPost() {
+    if (!nsosyalCheck?.publish.allowed) return;
+    const check = nsosyalCheck;
+    const demoPost: FeedPost = {
+      id: `nsosyal-${Date.now()}`,
+      author: user?.name || "truthlens_demo",
+      handle: user ? `@${user.email.split("@")[0]}` : "@truthlens_demo",
+      avatar: "",
+      content: check.content,
+      tag: "NSosyal Demo",
+      analysis_status: "ready",
+      truthlens_score: Math.max(0, 100 - check.toxicity.hate_speech),
+      misinformation_risk: 0,
+      polarization: check.toxicity.bullying,
+      hate_speech: check.toxicity.hate_speech,
+      sentiment: check.toxicity.context_note,
+      reason: check.moderation.reason,
+      risk_level: check.toxicity.risk_level,
+      verification: check.verification,
+      verified_by_truthlens: Boolean(check.verification.verified),
+      ai: {
+        summary: "NSosyal gönderisi TruthLens moderasyon adapterinden geçti.",
+        hate_speech: check.toxicity.hate_speech,
+        polarization: check.toxicity.bullying,
+        reasoning: check.moderation.reason,
+      },
+    };
+    setDemoFeed((current) => [demoPost, ...current]);
+    setFeedSource("demo");
+    setNsosyalPublished(true);
+  }
+
+  async function toggleSocialLike(post: FeedPost) {
+    const alreadyLiked = likedPostIds.has(post.id);
+    setSocialActionStatus("");
+    if (!alreadyLiked && post.cid && post.id.startsWith("at://")) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/social/like`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uri: post.id, cid: post.cid }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.detail || "Beğeni gönderilemedi.");
+        setSocialActionStatus("Beğeni Bluesky’ye gönderildi.");
+      } catch (err) {
+        setSocialActionStatus(err instanceof Error ? err.message : "Beğeni gönderilemedi.");
+        return;
+      }
+    }
+    setLikedPostIds((current) => {
+      const next = new Set(current);
+      if (alreadyLiked) next.delete(post.id); else next.add(post.id);
+      return next;
+    });
+  }
+
+  async function repostSocialPost(post: FeedPost) {
+    if (!post.cid || !post.id.startsWith("at://")) {
+      setSocialActionStatus("Bu demo gönderisi yerel akışta yeniden paylaşıldı.");
+      setDemoFeed((current) => [post, ...current]);
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE_URL}/social/repost`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri: post.id, cid: post.cid }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.detail || "Yeniden paylaşım gönderilemedi.");
+      setSocialActionStatus("Yeniden paylaşım Bluesky’ye gönderildi.");
+    } catch (err) {
+      setSocialActionStatus(err instanceof Error ? err.message : "Yeniden paylaşım gönderilemedi.");
+    }
+  }
+
+  function startSocialReply(post: FeedPost) {
+    setSocialView("home");
+    setNsosyalDraft(`@${post.handle.replace(/^@/, "")} `);
+    setSocialActionStatus("Yanıt taslağı hazırlandı; moderasyondan geçirerek yayınlayabilirsin.");
   }
 
   async function sendAnalysis(
@@ -1700,7 +1858,27 @@ export default function Home() {
                 </button>
               </div>
 
-              <div className="max-h-[82vh] overflow-y-auto px-4 pb-6 pt-5 md:px-6">
+              <nav className="flex flex-wrap gap-2 border-b border-slate-800 bg-slate-950/60 px-4 py-3 md:px-6" aria-label="Sosyal platform navigasyonu">
+                {([
+                  ["home", "Ana Akış"],
+                  ["liked", "Beğenilenler"],
+                  ["profile", "Profil"],
+                  ["settings", "Ayarlar"],
+                ] as const).map(([view, label]) => (
+                  <button
+                    key={view}
+                    onClick={() => setSocialView(view)}
+                    className={`rounded-xl px-4 py-2 text-sm font-semibold ${socialView === view ? "bg-blue-500/20 text-blue-200" : "text-slate-400 hover:bg-slate-800 hover:text-white"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <span className="ml-auto rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-xs font-bold text-cyan-300">
+                  {feedSource === "live" ? "Bluesky canlı sağlayıcı" : "Yerel demo sağlayıcı"}
+                </span>
+              </nav>
+
+              <div className={`max-h-[82vh] overflow-y-auto px-4 pb-6 pt-5 md:px-6 ${socialView === "home" ? "block" : "hidden"}`}>
                 {demoSummary && (
                   <div className="mb-5 rounded-2xl border border-blue-900/50 bg-blue-950/20 p-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1728,6 +1906,81 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+
+                <div className="mb-5 rounded-2xl border border-cyan-500/30 bg-cyan-950/20 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-[0.2em] text-cyan-300">NSosyal Entegrasyon Önizlemesi</div>
+                      <div className="mt-1 text-sm text-slate-300">Gönderi yayınlanmadan önce TruthLens moderasyon adapteri toksisiteyi ve insan incelemesi gereğini kontrol eder.</div>
+                    </div>
+                    <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-bold text-emerald-300">Adapter v1 · Hazır</span>
+                  </div>
+                  <textarea
+                    value={nsosyalDraft}
+                    onChange={(event) => {
+                      setNsosyalDraft(event.target.value);
+                      setNsosyalCheck(null);
+                      setNsosyalPublished(false);
+                    }}
+                    placeholder="NSosyal’de paylaşmak istediğin metni yaz..."
+                    className="mt-4 min-h-24 w-full rounded-xl border border-slate-700 bg-slate-950 p-3 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-400"
+                    maxLength={10000}
+                  />
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={checkNsosyalPost}
+                      disabled={nsosyalChecking || !nsosyalDraft.trim()}
+                      className="rounded-xl bg-cyan-500 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {nsosyalChecking ? "Toksisite ve moderasyon kontrol ediliyor..." : "Gönderiyi moderasyondan geçir"}
+                    </button>
+                    <span className="text-xs text-slate-500">Gerçek platforma otomatik paylaşım yapılmaz; bu alan entegrasyon sözleşmesini simüle eder.</span>
+                  </div>
+
+                  {nsosyalCheck && (
+                    <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="text-sm font-bold text-white">TruthLens karar motoru sonucu</div>
+                        <span className={`rounded-full px-3 py-1 text-xs font-bold ${nsosyalCheck.publish.allowed ? "bg-emerald-500/15 text-emerald-300" : "bg-rose-500/15 text-rose-300"}`}>
+                          {nsosyalCheck.publish.allowed ? "Yayın akışına uygun" : "İnsan incelemesine al"}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-200 md:grid-cols-4">
+                        <div className="rounded-lg border border-slate-800 bg-slate-900 p-2">Hakaret: %{nsosyalCheck.toxicity.insult}</div>
+                        <div className="rounded-lg border border-slate-800 bg-slate-900 p-2">Zorbalık: %{nsosyalCheck.toxicity.bullying}</div>
+                        <div className="rounded-lg border border-slate-800 bg-slate-900 p-2">Nefret: %{nsosyalCheck.toxicity.hate_speech}</div>
+                        <div className="rounded-lg border border-slate-800 bg-slate-900 p-2">Risk: {nsosyalCheck.toxicity.risk_level}</div>
+                      </div>
+                      <div className="mt-3 rounded-lg border border-blue-900/50 bg-blue-950/20 p-3 text-sm text-blue-100">
+                        <span className="font-semibold">Aksiyon:</span> {nsosyalCheck.moderation.action_label}. {nsosyalCheck.publish.message}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
+                        <span className="rounded-full border border-slate-700 px-3 py-1">API: `/nsosyal/moderation-check`</span>
+                        <span className="rounded-full border border-slate-700 px-3 py-1">İnsan onayı: {nsosyalCheck.publish.human_review_required ? "Gerekli" : "Gerekmiyor"}</span>
+                        <span className="rounded-full border border-slate-700 px-3 py-1">Otomatik silme: Kapalı</span>
+                      </div>
+                      {nsosyalCheck.publish.allowed && (
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button
+                            onClick={publishNsosyalDemoPost}
+                            className="rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-sm font-bold text-emerald-200 hover:bg-emerald-500/20"
+                          >
+                            NSosyal demo akışına ekle
+                          </button>
+                          <button
+                            onClick={publishToBluesky}
+                            className="rounded-xl border border-sky-400/40 bg-sky-500/10 px-4 py-2 text-sm font-bold text-sky-200 hover:bg-sky-500/20"
+                          >
+                            Bluesky’ye gerçek gönder
+                          </button>
+                        </div>
+                      )}
+                      {nsosyalPublished && (
+                        <div className="mt-3 text-sm font-semibold text-emerald-300">Gönderi kontrollü NSosyal demo akışına eklendi.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 {feedRefreshing && (
                   <div className="mb-4 rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
@@ -1820,11 +2073,16 @@ export default function Home() {
                         Doğruluk / Güvenilirlik: {Math.max(0, Math.min(100, post.truthlens_score ?? (100 - (post.misinformation_risk ?? 100))))}%
                       </div>
 
-                      <div className="mt-4 flex items-center justify-between gap-3">
-                        <div className="flex gap-3 text-xs text-slate-400">
+                      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
                           <span>💬 {post.engagement?.replies ?? 0}</span>
                           <span>🔁 {post.engagement?.reposts ?? 0}</span>
                           <span>♥ {post.engagement?.likes ?? 0}</span>
+                          <button onClick={() => toggleSocialLike(post)} className={`rounded-lg border px-3 py-1.5 font-semibold ${likedPostIds.has(post.id) ? "border-rose-400/40 bg-rose-500/15 text-rose-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"}`}>
+                            {likedPostIds.has(post.id) ? "♥ Beğenildi" : "♡ Beğen"}
+                          </button>
+                          <button onClick={() => repostSocialPost(post)} className="rounded-lg border border-slate-700 px-3 py-1.5 font-semibold text-slate-300 hover:bg-slate-800">🔁 Yeniden paylaş</button>
+                          <button onClick={() => startSocialReply(post)} className="rounded-lg border border-slate-700 px-3 py-1.5 font-semibold text-slate-300 hover:bg-slate-800">💬 Yanıtla</button>
                         </div>
                         <button
                           onClick={async () => {
@@ -1851,6 +2109,9 @@ export default function Home() {
                           Detaylı Analiz
                         </button>
                       </div>
+                      {socialActionStatus && (
+                        <div className="mt-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-2 text-xs text-cyan-200">{socialActionStatus}</div>
+                      )}
                       {post.analysis_status !== "ready" && post.analysis_status !== "cached" && (
                         <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs text-slate-400">
                           🤖 TruthLens analizi beklemede. Gönderi görünür durumda.
@@ -1870,6 +2131,59 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+
+              {socialView !== "home" && (
+                <div className="max-h-[82vh] overflow-y-auto px-4 pb-6 pt-5 md:px-6">
+                  {socialView === "liked" && (
+                    <div>
+                      <div className="mb-4 text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Kişisel koleksiyon</div>
+                      <h3 className="text-2xl font-bold text-white">Beğenilenler</h3>
+                      <div className="mt-4 space-y-3">
+                        {demoFeed.filter((post) => likedPostIds.has(post.id)).length === 0 ? (
+                          <div className="rounded-2xl border border-slate-800 bg-slate-950 p-5 text-sm text-slate-400">Henüz beğenilen gönderi yok. Ana Akış’ta kalp düğmesine bas.</div>
+                        ) : demoFeed.filter((post) => likedPostIds.has(post.id)).map((post) => (
+                          <div key={`liked-${post.id}`} className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                            <div className="text-sm font-semibold text-white">{post.author} <span className="text-slate-500">{post.handle}</span></div>
+                            <p className="mt-2 text-sm leading-6 text-slate-300">{post.content}</p>
+                            <button onClick={() => toggleSocialLike(post)} className="mt-3 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-200">Beğeniyi kaldır</button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {socialView === "profile" && (
+                    <div className="rounded-3xl border border-slate-800 bg-slate-950 p-6">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-blue-500/20 text-2xl font-bold text-blue-200">{(user?.name || "T").slice(0, 1).toUpperCase()}</div>
+                        <div>
+                          <h3 className="text-2xl font-bold text-white">{user?.name || "TruthLens Demo Profili"}</h3>
+                          <p className="text-sm text-slate-500">{user?.email || "@truthlens_demo"}</p>
+                        </div>
+                      </div>
+                      <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-4">
+                        <div className="rounded-xl border border-slate-800 bg-slate-900 p-3"><div className="text-xs text-slate-500">Gönderi</div><div className="mt-1 text-xl font-bold text-white">{demoFeed.length}</div></div>
+                        <div className="rounded-xl border border-slate-800 bg-slate-900 p-3"><div className="text-xs text-slate-500">Beğeni</div><div className="mt-1 text-xl font-bold text-white">{likedPostIds.size}</div></div>
+                        <div className="rounded-xl border border-slate-800 bg-slate-900 p-3"><div className="text-xs text-slate-500">Analiz</div><div className="mt-1 text-xl font-bold text-white">{history.length}</div></div>
+                        <div className="rounded-xl border border-slate-800 bg-slate-900 p-3"><div className="text-xs text-slate-500">Sağlayıcı</div><div className="mt-1 text-xl font-bold text-cyan-300">{feedSource === "live" ? "Bluesky" : "Demo"}</div></div>
+                      </div>
+                      <div className="mt-5 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-sm leading-6 text-slate-300">Bu profil paneli aynı sosyal arayüz içinde TruthLens analiz geçmişini ve platform sağlayıcısını gösterir. Gerçek Bluesky profil istatistikleri, sağlayıcı kimlik bilgileri yapılandırıldığında adapter üzerinden alınabilir.</div>
+                    </div>
+                  )}
+
+                  {socialView === "settings" && (
+                    <div className="rounded-3xl border border-slate-800 bg-slate-950 p-6">
+                      <div className="text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Platform ayarları</div>
+                      <h3 className="mt-2 text-2xl font-bold text-white">Sosyal deneyim ayarları</h3>
+                      <div className="mt-5 space-y-3">
+                        <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900 p-4"><div><div className="font-semibold text-white">Yayın öncesi moderasyon</div><div className="text-xs text-slate-500">NSosyal adapteri her gönderiyi yayın öncesi kontrol eder.</div></div><span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-bold text-emerald-300">Açık</span></div>
+                        <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900 p-4"><div><div className="font-semibold text-white">Otomatik silme</div><div className="text-xs text-slate-500">Geri dönüşü olmayan işlemler insan onayı olmadan çalışmaz.</div></div><span className="rounded-full bg-slate-700 px-3 py-1 text-xs font-bold text-slate-300">Kapalı</span></div>
+                        <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900 p-4"><div><div className="font-semibold text-white">Sağlayıcı</div><div className="text-xs text-slate-500">NSosyal API doğrulanana kadar güvenli fallback.</div></div><span className="rounded-full bg-cyan-500/15 px-3 py-1 text-xs font-bold text-cyan-300">{feedSource === "live" ? "Bluesky" : "Demo"}</span></div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
           </div>
         )}

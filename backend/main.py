@@ -1137,6 +1137,8 @@ def get_llm_client() -> OpenAI:
     return OpenAI(
         api_key=NARAROUTER_API_KEY,
         base_url="https://router.bynara.id/v1",
+        timeout=30.0,
+        max_retries=0,
     )
 
 def get_tavily_client() -> TavilyClient:
@@ -1184,7 +1186,7 @@ def fetch_webpage(url: str) -> Optional[str]:
         "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
     }
     try:
-        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        response = requests.get(url, headers=headers, timeout=6, allow_redirects=True)
         response.raise_for_status()
         text = response.text
         with HTML_CACHE_LOCK:
@@ -1411,7 +1413,7 @@ def detect_ai_image(image_url: str) -> Optional[dict]:
                 "api_user": SIGHTENGINE_API_USER,
                 "api_secret": SIGHTENGINE_API_SECRET,
             },
-            timeout=20,
+            timeout=8,
         )
         response.raise_for_status()
         payload = response.json() if response.content else {}
@@ -1761,6 +1763,7 @@ def call_llm(messages: list, temperature: float = 0.2) -> str:
             model=NARAROUTER_MODEL,
             messages=messages,
             temperature=temperature,
+            max_tokens=900,
             response_format={"type": "json_object"},
         )
         return completion.choices[0].message.content or ""
@@ -2175,8 +2178,10 @@ def analyze_source_chain(
     unique_urls = set()
     raw_results = []
     
-    for q in queries[:2]:
-        results = search_with_tavily(q, max_results=4)
+    search_queries = queries[:2]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(search_queries) or 1) as search_executor:
+        search_batches = list(search_executor.map(lambda q: search_with_tavily(q, max_results=3), search_queries))
+    for results in search_batches:
         for r in results:
             url = r.get("url")
             if url and url not in unique_urls:
@@ -2210,16 +2215,20 @@ def analyze_source_chain(
                 published = current_date or published
                 site_name = current_site or site_name
                 
-            html = fetch_webpage(item_url)
-            if html:
-                meta = extract_page_metadata(html, item_url)
-                published = parse_datetime_value(meta.get("published_time", "")) or published
-                author = str(meta.get("author", "") or "").strip()
-                site_name = str(meta.get("site_name", "") or site_name).strip()
-                if meta.get("title"):
-                    item_title = str(meta.get("title")).strip()
-                if meta.get("article_body"):
-                    item_content = str(meta.get("article_body")).strip()
+            # Mevcut gönderi sayfası zaten /analyze içinde indirildi; yeniden indirme.
+            if item_url == current_url and body:
+                item_content = body
+            else:
+                html = fetch_webpage(item_url)
+                if html:
+                    meta = extract_page_metadata(html, item_url)
+                    published = parse_datetime_value(meta.get("published_time", "")) or published
+                    author = str(meta.get("author", "") or "").strip()
+                    site_name = str(meta.get("site_name", "") or site_name).strip()
+                    if meta.get("title"):
+                        item_title = str(meta.get("title")).strip()
+                    if meta.get("article_body"):
+                        item_content = str(meta.get("article_body")).strip()
         except Exception as exc:
             print(f"[TruthLens] Source metadata fetching error for {item_url}: {exc}")
             
@@ -2804,6 +2813,54 @@ def analyze_url(payload: dict, request: Request):
     return analyze(AnalysisRequest(content=url), request)
 
 
+@app.post("/nsosyal/moderation-check")
+def nsosyal_moderation_check(payload: dict, request: Request):
+    """NSosyal gönderi oluşturma akışının entegrasyona hazır moderasyon adapteri."""
+    content = str(payload.get("content", "")).strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Gönderi metni gerekli.")
+    if len(content) > 10000:
+        raise HTTPException(status_code=422, detail="Gönderi metni 10.000 karakteri aşamaz.")
+
+    result = analyze(AnalysisRequest(content=content), request)
+    moderation = result.moderation
+    publish_allowed = moderation.action in {"izin_ver", "etiketle"}
+    publish_state = "allow_with_label" if moderation.action == "etiketle" else (
+        "allow" if publish_allowed else "hold_for_human_review"
+    )
+
+    return {
+        "adapter": {
+            "platform": "NSosyal",
+            "status": "ready_for_platform_adapter",
+            "api_version": "v1",
+            "contract": {
+                "input": "post.content",
+                "output": "moderation.action, moderation.reason, toxicity, human_review, publish_state",
+                "irreversible_actions": "never_automatic",
+            },
+        },
+        "content": content,
+        "content_hash": result.content_hash,
+        "toxicity": result.toxicity.model_dump(),
+        "moderation": moderation.model_dump(),
+        "verification": result.verification.model_dump(),
+        "publish": {
+            "allowed": publish_allowed,
+            "state": publish_state,
+            "label_required": moderation.action == "etiketle",
+            "human_review_required": moderation.requires_human_review,
+            "message": (
+                "Gönderi NSosyal yayın akışına bırakılabilir; uyarı etiketi eklenir."
+                if moderation.action == "etiketle"
+                else "Gönderi yayınlanabilir."
+                if moderation.action == "izin_ver"
+                else "Gönderi yayın kuyruğuna alınmaz; insan moderatör incelemesi gerekir."
+            ),
+        },
+    }
+
+
 @app.get("/demo-feed")
 def demo_feed():
     posts = build_demo_feed()
@@ -2836,6 +2893,71 @@ def bluesky_status():
         "password_configured": bool(BLUESKY_APP_PASSWORD),
         "provider": "bluesky" if bool(BLUESKY_HANDLE and BLUESKY_APP_PASSWORD) else "demo",
     }
+
+
+def require_bluesky_client() -> Client:
+    if not BLUESKY_HANDLE or not BLUESKY_APP_PASSWORD:
+        raise HTTPException(status_code=503, detail="Bluesky sağlayıcısı yapılandırılmamış; demo modu kullanılabilir.")
+    return get_bluesky_client()
+
+
+@app.get("/social/profile")
+def social_profile():
+    client = require_bluesky_client()
+    profile = client.get_profile(actor=BLUESKY_HANDLE)
+    return {
+        "provider": "bluesky",
+        "profile": {
+            "did": str(getattr(profile, "did", "")),
+            "handle": str(getattr(profile, "handle", BLUESKY_HANDLE)),
+            "display_name": str(getattr(profile, "display_name", "") or ""),
+            "description": str(getattr(profile, "description", "") or ""),
+            "avatar": str(getattr(profile, "avatar", "") or ""),
+            "followers_count": int(getattr(profile, "followers_count", 0) or 0),
+            "follows_count": int(getattr(profile, "follows_count", 0) or 0),
+            "posts_count": int(getattr(profile, "posts_count", 0) or 0),
+        },
+    }
+
+
+@app.post("/social/create-post")
+def social_create_post(payload: dict):
+    content = str(payload.get("content", "")).strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Gönderi metni gerekli.")
+    client = require_bluesky_client()
+    response = client.send_post(text=content)
+    return {
+        "provider": "bluesky",
+        "status": "published",
+        "post": {
+            "uri": str(getattr(response, "uri", "")),
+            "cid": str(getattr(response, "cid", "")),
+            "content": content,
+        },
+    }
+
+
+@app.post("/social/like")
+def social_like(payload: dict):
+    uri = str(payload.get("uri", "")).strip()
+    cid = str(payload.get("cid", "")).strip()
+    if not uri or not cid:
+        raise HTTPException(status_code=400, detail="uri ve cid gerekli.")
+    client = require_bluesky_client()
+    response = client.like(uri=uri, cid=cid)
+    return {"provider": "bluesky", "status": "liked", "uri": uri, "cid": cid, "like_uri": str(getattr(response, "uri", ""))}
+
+
+@app.post("/social/repost")
+def social_repost(payload: dict):
+    uri = str(payload.get("uri", "")).strip()
+    cid = str(payload.get("cid", "")).strip()
+    if not uri or not cid:
+        raise HTTPException(status_code=400, detail="uri ve cid gerekli.")
+    client = require_bluesky_client()
+    response = client.repost(uri=uri, cid=cid)
+    return {"provider": "bluesky", "status": "reposted", "uri": uri, "cid": cid, "repost_uri": str(getattr(response, "uri", ""))}
 
 
 @app.post("/demo-feed/analyze")
