@@ -41,6 +41,19 @@ class ToxicityAnalysisTest(unittest.TestCase):
         self.assertIsInstance(result.moderation, ModerationDecision)
         self.assertEqual(result.moderation.action, "izin_ver")
 
+    def test_run_analysis_falls_back_when_llm_is_unavailable(self):
+        import main
+
+        original = main.call_llm
+        main.call_llm = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("NaraRouter hatası"))
+        try:
+            result = main.run_analysis("Bu içerik analize ediliyor.")
+            self.assertIsInstance(result, AnalysisResponse)
+            self.assertEqual(result.moderation.action, "izin_ver")
+            self.assertIn("beklemede", result.explanation.lower())
+        finally:
+            main.call_llm = original
+
     def test_demo_feed_has_posts_and_summary(self):
         from main import build_demo_feed, summarize_demo_feed
 
@@ -134,6 +147,18 @@ class ModerationDecisionTest(unittest.TestCase):
             current = severity[decision.action]
             self.assertGreaterEqual(current, prev, f"hate_speech={hs} aksiyonu geriletti")
             prev = current
+
+    def test_targeted_group_dehumanization_is_severe(self):
+        toxicity = ToxicityAnalysis(
+            insult=25,
+            bullying=15,
+            hate_speech=68,
+            targeted_person_or_group="Dini/Etnik Grup",
+            risk_level="Yüksek",
+            context_note="Dehumanization",
+        )
+        decision = decide_moderation_action(toxicity)
+        self.assertEqual(decision.action, "kaldirma_oner")
 
 
 if __name__ == "__main__":

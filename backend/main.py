@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 from urllib.parse import urljoin
+from io import BytesIO
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,13 +23,28 @@ from openai import OpenAI
 from tavily import TavilyClient
 from atproto import Client
 
+try:
+    from PIL import Image
+    import pytesseract
+except Exception:
+    Image = None
+    pytesseract = None
+
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 NARAROUTER_API_KEY = os.getenv("NARAROUTER_API_KEY")
 NARAROUTER_MODEL = os.getenv("NARAROUTER_MODEL", "laguna-s-2.1")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER")
-SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET")
+SIGHTENGINE_API_USER = (
+    os.getenv("SIGHTENGINE_API_USER")
+    or os.getenv("SIGHTENGINE_USER")
+    or os.getenv("SIGHTENGINE_API_KEY")
+)
+SIGHTENGINE_API_SECRET = (
+    os.getenv("SIGHTENGINE_API_SECRET")
+    or os.getenv("SIGHTENGINE_SECRET")
+)
+
 BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
 BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD")
 BLUESKY_FEED_LIMIT = int(os.getenv("BLUESKY_FEED_LIMIT", "5"))
@@ -103,17 +119,6 @@ class SourceAnalysis(BaseModel):
     source_chain: List[SourceChainItem] = Field(default_factory=list)
     reasoning: str = ""
 
-class ImageAnalysis(BaseModel):
-    image_ai_probability: int = 0
-    image_is_ai: Optional[bool] = None
-    image_analysis_available: bool = False
-    image_analysis_reasoning: str = ""
-    image_url: str = ""
-
-class ImageAnalysisRequest(BaseModel):
-    image_url: str = Field(min_length=5, max_length=5000)
-    source_url: str = Field(default="", max_length=5000)
-
 class ToxicityAnalysis(BaseModel):
     insult: int = 0
     bullying: int = 0
@@ -122,6 +127,19 @@ class ToxicityAnalysis(BaseModel):
     risk_level: str = "Düşük"
     context_note: str = "Bağlam değerlendirmesi yapılmadı."
 
+
+class ImageAnalysis(BaseModel):
+    image_ai_probability: int = 0
+    image_is_ai: Optional[bool] = None
+    image_analysis_available: bool = False
+    image_analysis_reasoning: str = ""
+    visible_text: str = ""
+    image_toxicity: ToxicityAnalysis = Field(default_factory=ToxicityAnalysis)
+    image_url: str = ""
+
+class ImageAnalysisRequest(BaseModel):
+    image_url: str = Field(min_length=5, max_length=5000)
+    source_url: str = Field(default="", max_length=5000)
 
 class ModerationDecision(BaseModel):
     """
@@ -174,6 +192,9 @@ class AnalysisResponse(BaseModel):
     image_ai_probability: int = 0
     image_is_ai: Optional[bool] = None
     image_analysis_available: bool = False
+    image_text: str = ""
+    image_toxicity: ToxicityAnalysis = Field(default_factory=ToxicityAnalysis)
+    image_moderation_note: str = ""
     source_analysis: SourceAnalysis = Field(default_factory=SourceAnalysis)
 
 ANALYSIS_CACHE: Dict[str, object] = {}
@@ -189,58 +210,94 @@ RISK_LEVEL_SCORE = {"Düşük": 0, "Orta": 45, "Yüksek": 80}
 
 
 def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
+    """
+    Yüksek riskli hedefli saldırılar ve tehditler, "potansiyel saldırgan" seviyesine göre
+    boşluk bırakmadan kaldırma önerisine alınır.
+
+    - Severe (kaldırma): yüksek nefret, ileri düzey grup hedefleme, dehumanizasyon,
+      şiddet tehdidi veya risk_level=Yüksek + hedefli saldırı.
+    - Moderate (gizle_ve_incele): orta-yüksek risk, hedefli saldırı/önyargı.
+    - Mild (etiketle): hafif hakaret, pasif-agresif yorum.
+    - Allow (izin_ver): anlamlı toksisite sinyali yok.
+    """
     risk_level_component = RISK_LEVEL_SCORE.get(toxicity.risk_level, 0)
+    target_is_generic = toxicity.targeted_person_or_group in ["Genel", "", None]
+    target_is_specific = not target_is_generic
+
     aggregate_risk = max(
         toxicity.hate_speech,
         toxicity.bullying,
-        int(toxicity.insult * 0.8),  # hakaret tek başına en ağır sinyal değildir
+        int(toxicity.insult * 0.7),
         risk_level_component,
     )
 
-    if toxicity.hate_speech >= 70 or toxicity.bullying >= 80:
+    severe_targeted_attack = (
+        target_is_specific and (
+            toxicity.hate_speech >= 60 or
+            toxicity.bullying >= 70 or
+            toxicity.insult >= 70 or
+            (toxicity.risk_level == "Yüksek" and (toxicity.hate_speech >= 45 or toxicity.bullying >= 55))
+        )
+    )
+
+    # SEVERE: Kaldırma önerisi (targeted threats, hate speech, severe bullying)
+    if (
+        (toxicity.hate_speech >= 65 and toxicity.bullying >= 70) or
+        (toxicity.hate_speech >= 75) or
+        (toxicity.bullying >= 85) or
+        severe_targeted_attack
+    ):
         return ModerationDecision(
             action="kaldirma_oner",
             action_label="Kaldırma önerisi - insan onayı gerekli",
             reason=(
-                f"Yüksek şiddette nefret söylemi ({toxicity.hate_speech}/100) veya "
-                f"zorbalık ({toxicity.bullying}/100) tespit edildi. Geri dönüşü olmayan "
-                f"bir aksiyon olduğu için otomatik silme yapılmaz; içerik moderatör "
-                f"onayına düşer."
+                f"Ağır nefret söylemi ({toxicity.hate_speech}/100), hedefli saldırı "
+                f"veya yüksek-risk dehumanizasyon tespit edildi. "
+                f"Hedefi: {toxicity.targeted_person_or_group}. "
+                f"Geri dönüşü olmayan bir aksiyon olduğu için otomatik silme yapılmaz."
             ),
             requires_human_review=True,
             appeal_eligible=True,
             aggregate_risk=aggregate_risk,
         )
 
+    # MODERATE: Gizle ve incele (medium-high toxicity)
     if (
-        toxicity.hate_speech >= 40
-        or toxicity.bullying >= 50
-        or toxicity.insult >= 60
-        or toxicity.risk_level == "Yüksek"
+        (toxicity.hate_speech >= 35 and toxicity.hate_speech < 65) or
+        (toxicity.bullying >= 45 and toxicity.bullying < 70) or
+        (toxicity.insult >= 55 and target_is_specific) or
+        (toxicity.risk_level == "Yüksek" and not target_is_generic)
     ):
         return ModerationDecision(
             action="gizle_ve_incele",
             action_label="İçerik gizlendi, incelemeye alındı",
             reason=(
-                f"Orta-yüksek risk sinyalleri (hakaret {toxicity.insult}, zorbalık "
-                f"{toxicity.bullying}, nefret söylemi {toxicity.hate_speech}) içerik "
-                f"görünürlüğünü sınırlar; nihai karar için insan incelemesi gerekir."
+                f"Orta-yüksek risk sinyalleri: hakaret {toxicity.insult}/100, "
+                f"zorbalık {toxicity.bullying}/100, nefret söylemi {toxicity.hate_speech}/100. "
+                f"Hedef: {toxicity.targeted_person_or_group}. "
+                f"Nihai karar için moderatör incelemesi gerekir."
             ),
             requires_human_review=True,
             appeal_eligible=True,
             aggregate_risk=aggregate_risk,
         )
 
+    # MILD: Etiketle (low-medium toxicity)
     if (
-        toxicity.hate_speech >= 15
-        or toxicity.bullying >= 20
-        or toxicity.insult >= 25
-        or toxicity.risk_level == "Orta"
+        (toxicity.hate_speech >= 12 and toxicity.hate_speech < 35) or
+        (toxicity.bullying >= 18 and toxicity.bullying < 45) or
+        (toxicity.insult >= 22 and toxicity.insult < 55) or
+        toxicity.risk_level == "Orta"
     ):
         return ModerationDecision(
             action="etiketle",
             action_label="İçerik uyarı etiketiyle yayında kalıyor",
-            reason="Düşük-orta şiddette risk sinyali var; içerik kaldırılmadan bağlam etiketi eklenir.",
+            reason=(
+                f"Düşük-orta şiddette risk sinyali: hakaret {toxicity.insult}, "
+                f"zorbalık {toxicity.bullying}, nefret söylemi {toxicity.hate_speech}. "
+                f"İçerik kaldırılmadan bağlam etiketi eklenir. "
+                f"Risk seviyesi: {toxicity.risk_level}"
+            ),
             requires_human_review=False,
             appeal_eligible=False,
             aggregate_risk=aggregate_risk,
@@ -253,6 +310,31 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
         requires_human_review=False,
         appeal_eligible=False,
         aggregate_risk=aggregate_risk,
+    )
+
+
+def merge_toxicity_signals(text_toxicity: ToxicityAnalysis, image_toxicity: ToxicityAnalysis) -> ToxicityAnalysis:
+    """Metin ve görsel toksisite sinyallerini ihtiyatlı biçimde birleştirir."""
+    return ToxicityAnalysis(
+        insult=max(text_toxicity.insult, image_toxicity.insult),
+        bullying=max(text_toxicity.bullying, image_toxicity.bullying),
+        hate_speech=max(text_toxicity.hate_speech, image_toxicity.hate_speech),
+        targeted_person_or_group=(
+            image_toxicity.targeted_person_or_group
+            if image_toxicity.targeted_person_or_group not in {"", "Genel"}
+            else text_toxicity.targeted_person_or_group
+        ),
+        risk_level=(
+            "Yüksek"
+            if "Yüksek" in {text_toxicity.risk_level, image_toxicity.risk_level}
+            else "Orta"
+            if "Orta" in {text_toxicity.risk_level, image_toxicity.risk_level}
+            else "Düşük"
+        ),
+        context_note=(
+            f"Metin ve görsel birlikte değerlendirildi. "
+            f"Görsel sinyali: {image_toxicity.context_note}"
+        ),
     )
 
 
@@ -1424,11 +1506,19 @@ def detect_ai_image(image_url: str) -> Optional[dict]:
     ai_probability = 0
     is_ai = None
 
+    type_payload = payload.get("type") if isinstance(payload.get("type"), dict) else {}
+    genai_payload = payload.get("genai") if isinstance(payload.get("genai"), dict) else {}
+    type_ai = type_payload.get("ai_generated")
     candidates = [
-        payload.get("type", {}).get("ai_generated") if isinstance(payload.get("type"), dict) else None,
-        payload.get("genai", {}).get("prob") if isinstance(payload.get("genai"), dict) else None,
-        payload.get("genai", {}).get("ai_probability") if isinstance(payload.get("genai"), dict) else None,
-        payload.get("genai", {}).get("ai_prob") if isinstance(payload.get("genai"), dict) else None,
+        type_ai,
+        type_ai.get("prob") if isinstance(type_ai, dict) else None,
+        type_ai.get("probability") if isinstance(type_ai, dict) else None,
+        type_ai.get("score") if isinstance(type_ai, dict) else None,
+        genai_payload.get("prob"),
+        genai_payload.get("probability"),
+        genai_payload.get("ai_probability"),
+        genai_payload.get("ai_prob"),
+        payload.get("ai_probability"),
     ]
 
     for value in candidates:
@@ -1441,6 +1531,7 @@ def detect_ai_image(image_url: str) -> Optional[dict]:
     genai = payload.get("genai")
     if isinstance(genai, dict):
         for key in ("is_ai", "ai_generated", "classification"):
+
             value = genai.get(key)
             if isinstance(value, bool):
                 is_ai = value
@@ -1469,11 +1560,55 @@ def detect_ai_image(image_url: str) -> Optional[dict]:
     return res
 
 def image_cache_key(image_url: str, source_url: str = "") -> str:
-    raw = f"truthlens:image:v1|{normalize_url(source_url)}|{normalize_url(image_url)}"
+    # Sightengine + vision + image-to-moderation sözleşmesi değişti; eski 0/fallback sonuçlarını kullanma.
+    raw = f"truthlens:image:v2-sightengine-vision-moderation|{normalize_url(source_url)}|{normalize_url(image_url)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 def image_url_is_reasonable(image_url: str) -> bool:
     return bool(re.match(r"^https?://", image_url or "", re.IGNORECASE))
+
+def ocr_image_text(image_url: str) -> str:
+    """Vision LLM kullanılamadığında görsel yazısını yerel OCR ile okumayı dener."""
+    if Image is None or pytesseract is None or not image_url_is_reasonable(image_url):
+        return ""
+    try:
+        response = requests.get(image_url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+        return str(pytesseract.image_to_string(image, lang="tur+eng") or "").strip()[:3000]
+    except Exception as exc:
+        print(f"[TruthLens] OCR fallback error: {exc}")
+        return ""
+
+
+def heuristic_image_toxicity(visible_text: str) -> ToxicityAnalysis:
+    """OCR metnini ihtiyatlı bir aday sinyal olarak moderasyon kararına taşır."""
+    normalized = re.sub(r"\s+", " ", (visible_text or "").lower()).strip()
+    if not normalized:
+        return ToxicityAnalysis(context_note="Görselde okunabilir metin bulunamadı.")
+
+    strong_terms = ("siktir", "sikik", "amk", "aq", "oç", "orospu", "şerefsiz", "piç")
+    mild_terms = ("salak", "aptal", "gerizekalı", "mal", "lan")
+    strong_hits = [term for term in strong_terms if term in normalized]
+    mild_hits = [term for term in mild_terms if term in normalized]
+    if not strong_hits and not mild_hits:
+        return ToxicityAnalysis(context_note="Görsel metni okundu; bilinen argo adayı bulunmadı.")
+
+    insult = 82 if strong_hits else 55
+    risk_level = "Yüksek" if strong_hits else "Orta"
+    return ToxicityAnalysis(
+        insult=insult,
+        bullying=58 if strong_hits else 48,
+        hate_speech=0,
+        targeted_person_or_group="Genel",
+        risk_level=risk_level,
+        context_note=(
+            "OCR görsel metninde argo/hakaret adayı bulundu: "
+            + ", ".join(strong_hits or mild_hits)
+            + ". Bu sinyal insan incelemesi için değerlendirilmelidir."
+        ),
+    )
+
 
 def analyze_image_ai_probability(image_url: str, source_url: str = "") -> dict:
     if not image_url_is_reasonable(image_url):
@@ -1481,6 +1616,15 @@ def analyze_image_ai_probability(image_url: str, source_url: str = "") -> dict:
             "image_ai_probability": 0,
             "image_analysis_available": False,
             "image_analysis_reasoning": "Geçerli bir görsel URL'si bulunamadı.",
+            "visible_text": "",
+            "image_toxicity": {
+                "insult": 0,
+                "bullying": 0,
+                "hate_speech": 0,
+                "targeted_person_or_group": "Genel",
+                "risk_level": "Düşük",
+                "context_note": "URL geçersiz.",
+            },
             "image_url": "",
         }
 
@@ -1489,19 +1633,39 @@ def analyze_image_ai_probability(image_url: str, source_url: str = "") -> dict:
     if isinstance(cached, dict):
         return cached
 
-    prompt = """
-Bu görsel için yalnızca JSON döndür.
-Görselin AI ile üretilmiş ya da ciddi şekilde AI ile değiştirilmiş olma ihtimalini tahmin et.
-Kesin hüküm verme. Kısa, ihtiyatlı ve Türkçe yaz.
+    # Step 1: Sightengine API'sini çağır (fast, accurate AI detection)
+    t0_sight = time.time()
+    sightengine_result = detect_ai_image(image_url)
+    ai_probability_from_sightengine = sightengine_result.get("ai_probability", 0) if sightengine_result else 0
+    dur_sight = time.time() - t0_sight
+    print(f"[TruthLens] Sightengine AI check: {dur_sight:.2f}s → {ai_probability_from_sightengine}%")
 
-JSON:
+    # LLM başarısız olsa bile OCR ile görsel metni ve argo adayı kaybetme.
+    ocr_text = ocr_image_text(image_url)
+    ocr_toxicity = heuristic_image_toxicity(ocr_text)
+
+    # Step 2: LLM vision model'i çağır (toksisitesi ve metin extraction için)
+    prompt = """
+Bu görseli sosyal medya güvenliği ve içerik moderasyonu açısından incele.
+Görselde okunabilen yazı varsa aynen veya güvenli biçimde kısa bir özet olarak çıkar.
+Görsel içindeki argo, hakaret, tehdit, hedefli saldırı veya nefret söylemi sinyallerini değerlendir.
+Kesin hüküm verme; okunamayan metin varsa bunu açıkça belirt.
+Yalnızca aşağıdaki JSON formatında yanıt ver:
 {
-  "image_ai_probability": 0-100,
-  "image_analysis_available": true,
-  "image_analysis_reasoning": "Kısa açıklama"
+  "image_analysis_reasoning": "Görselin güvenlik açısından kısa değerlendirmesi",
+  "visible_text": "Görseldeki okunabilir metin veya boş metin",
+  "image_toxicity": {
+    "insult": 0-100,
+    "bullying": 0-100,
+    "hate_speech": 0-100,
+    "targeted_person_or_group": "Genel veya hedef",
+    "risk_level": "Düşük/Orta/Yüksek",
+    "context_note": "Görsel metni ve güvenlik bağlamı"
+  }
 }
 """
     try:
+        t0_llm = time.time()
         client = get_llm_client()
         completion = client.chat.completions.create(
             model=NARAROUTER_MODEL,
@@ -1519,10 +1683,25 @@ JSON:
         )
         raw = completion.choices[0].message.content or ""
         data = json.loads(raw)
+        dur_llm = time.time() - t0_llm
+        print(f"[TruthLens] Image LLM toxicity: {dur_llm:.2f}s")
+        
         result = {
-            "image_ai_probability": safe_score(data.get("image_ai_probability")),
-            "image_analysis_available": bool(data.get("image_analysis_available", True)),
-            "image_analysis_reasoning": str(data.get("image_analysis_reasoning", "")).strip() or "Görsel analizi tamamlandı.",
+            "image_ai_probability": ai_probability_from_sightengine,
+            "image_analysis_available": True,
+            "image_analysis_reasoning": str(data.get("image_analysis_reasoning", "")).strip() or f"Sightengine: %{ai_probability_from_sightengine} AI olasılığı.",
+            "visible_text": str(data.get("visible_text", "") or "").strip() or ocr_text,
+            "image_toxicity": merge_toxicity_signals(
+                ocr_toxicity,
+                ToxicityAnalysis(
+                    insult=safe_score((data.get("image_toxicity") or {}).get("insult")),
+                    bullying=safe_score((data.get("image_toxicity") or {}).get("bullying")),
+                    hate_speech=safe_score((data.get("image_toxicity") or {}).get("hate_speech")),
+                    targeted_person_or_group=str((data.get("image_toxicity") or {}).get("targeted_person_or_group") or "Genel"),
+                    risk_level=str((data.get("image_toxicity") or {}).get("risk_level") or "Düşük"),
+                    context_note=str((data.get("image_toxicity") or {}).get("context_note") or "Vision toksisite analizi tamamlandı."),
+                ),
+            ),
             "image_url": image_url,
         }
         ANALYSIS_CACHE[cache_key] = result
@@ -1530,9 +1709,11 @@ JSON:
     except Exception as exc:
         print(f"[TruthLens] Image LLM error: {exc}")
         fallback = {
-            "image_ai_probability": 0,
-            "image_analysis_available": False,
-            "image_analysis_reasoning": "Görsel analizi şu anda kullanılamıyor.",
+            "image_ai_probability": ai_probability_from_sightengine,
+            "image_analysis_available": bool(ai_probability_from_sightengine > 0 or ocr_text),
+            "image_analysis_reasoning": f"Sightengine AI tespiti: %{ai_probability_from_sightengine}. Vision analizi kullanılamadı; OCR fallback uygulandı.",
+            "visible_text": ocr_text,
+            "image_toxicity": ocr_toxicity.model_dump(),
             "image_url": image_url,
         }
         ANALYSIS_CACHE[cache_key] = fallback
@@ -1928,8 +2109,9 @@ def run_analysis(analyzed_content: str, source_url: Optional[str] = None) -> Ana
     if key in ANALYSIS_CACHE:
         return ANALYSIS_CACHE[key]
 
-    analyzed_excerpt = analyzed_content[:350]
-    prompt = f"""
+    try:
+        analyzed_excerpt = analyzed_content[:350]
+        prompt = f"""
 Sen TruthLens AI adlı Türkçe bilgi doğrulama sistemisin.
 Sadece JSON döndür. Kısa, güvenli ve ihtiyatlı ol.
 
@@ -1975,11 +2157,55 @@ JSON formatı:
   "contradicting_sources": []
 }}
 """
-    final_raw = call_llm([{"role": "user", "content": prompt}], temperature=0.1)
-    try:
-        data = json.loads(final_raw)
-    except Exception:
-        raise HTTPException(status_code=502, detail="LLM JSON döndürmedi.")
+        final_raw = call_llm([{"role": "user", "content": prompt}], temperature=0.1)
+        try:
+            data = json.loads(final_raw)
+        except Exception:
+            raise HTTPException(status_code=502, detail="LLM JSON döndürmedi.")
+    except Exception as exc:
+        print(f"[TruthLens] LLM fallback triggered for analysis: {exc}")
+        fallback = AnalysisResponse(
+            score=50,
+            manipulation=25,
+            clickbait=20,
+            result="Kanıt yetersiz",
+            explanation="AI analizi şu anda beklemede; canlı model bağlantısı kurulamadı. Bu nedenle geçici, güvenli bir düşük-risk sonuç döndürüldü.",
+            score_breakdown="Model erişilemediği için geçici güvenli değerlendirme kullanıldı.",
+            validity="Belirsiz",
+            emotion="Nötr",
+            time_validity="Geçerlilik doğrulanamadı; model erişimi yok.",
+            polarization_risk=15,
+            echo_chamber="Yüksek doğrulama güveni yok; manuel inceleme önerilir.",
+            ai_rewrite="İçerik tarafsız şekilde incelenmek üzere bekletildi.",
+            social_risk_summary="Canlı LLM erişilemediği için otomatik değerlendirme geçici olarak askıya alındı.",
+            toxicity=ToxicityAnalysis(
+                insult=0,
+                bullying=0,
+                hate_speech=0,
+                targeted_person_or_group="Genel",
+                risk_level="Düşük",
+                context_note="Canlı model erişilemediği için güvenli mod devrede.",
+            ),
+            moderation=decide_moderation_action(ToxicityAnalysis(
+                insult=0,
+                bullying=0,
+                hate_speech=0,
+                targeted_person_or_group="Genel",
+                risk_level="Düşük",
+                context_note="Güvenli mod",
+            )),
+            claims=[],
+            context="Bu yanıt, canlı LLM erişilemediği için güvenli yedek modda üretildi.",
+            sources=[],
+            supporting_sources=[],
+            contradicting_sources=[],
+            image_text="",
+            image_toxicity=ToxicityAnalysis(),
+            image_moderation_note="Görsel analizi yapılamadı; model erişilemedi.",
+            source_analysis=SourceAnalysis(),
+        )
+        ANALYSIS_CACHE[key] = fallback
+        return fallback
 
     data["validity"], data["time_validity"] = infer_time_validity_and_validity(
         analyzed_content,
@@ -2527,13 +2753,32 @@ def analyze_source_chain(
                     ),
                 )
             )
+        fallback_candidates = [
+            item for item in source_chain_items
+            if item.url and item.match_probability >= 10
+        ]
+        fallback_candidates.sort(
+            key=lambda item: item.match_probability,
+            reverse=True,
+        )
         return SourceAnalysis(
-            source_status="uncertain",
+            source_status="partial_error",
             source_probability=0,
-            likely_original_source="Doğrulanamadı",
+            likely_original_source=(
+                "Aday kaynaklar bulundu — birincil kaynak doğrulaması bekliyor"
+                if fallback_candidates else "Kaynak adayı bulunamadı"
+            ),
+            likely_original_url=fallback_candidates[0].url if fallback_candidates else "",
+            likely_original_platform=fallback_candidates[0].platform if fallback_candidates else "",
             current_source_date=current_date,
-            source_chain=source_chain_items,
-            reasoning=f"Kaynak analizi sırasında hata oluştu: {str(e)}"
+            source_chain=fallback_candidates,
+            reasoning=(
+                "Kaynak araması tamamlandı; ancak birincil kaynak değerlendirmesi "
+                "zaman aşımı nedeniyle tamamlanamadı. Aşağıdaki bağlantılar doğrulanmış "
+                "birincil kaynak değil, incelenmesi gereken aday kaynaklardır."
+                if fallback_candidates
+                else "Kaynak araması sırasında zaman aşımı oluştu ve gösterilebilir aday kaynak bulunamadı."
+            ),
         ).model_dump()
 
 @app.post("/login")
@@ -2704,6 +2949,9 @@ def analyze(request_body: AnalysisRequest, request: Request):
     image_ai_probability = 0
     image_is_ai = None
     image_analysis_available = False
+    image_text = ""
+    image_toxicity = ToxicityAnalysis()
+    image_moderation_note = ""
     source_analysis = SourceAnalysis()
 
     # Parallel execution using ThreadPoolExecutor
@@ -2717,8 +2965,11 @@ def analyze(request_body: AnalysisRequest, request: Request):
             metadata = (post.get("metadata") or {}) if "post" in locals() else {}
             primary_image = str(metadata.get("image_url", "") or "").strip()
             if primary_image:
-                image_analysis_available = True
-                future_image = executor.submit(detect_ai_image, primary_image)
+                future_image = executor.submit(
+                    analyze_image_ai_probability,
+                    primary_image,
+                    source_url or url,
+                )
                 
         # Submit analyze_source_chain if url exists
         future_source = None
@@ -2735,18 +2986,65 @@ def analyze(request_body: AnalysisRequest, request: Request):
             )
             
         # Get run_analysis result
-        result = future_result.result()
+        try:
+            result = future_result.result()
+        except Exception as e:
+            print(f"[TruthLens] run_analysis thread error: {e}")
+            result = AnalysisResponse(
+                score=50, manipulation=25, clickbait=20,
+                result="Kanıt yetersiz", explanation="Thread hatası.",
+                score_breakdown="Hata.", validity="Belirsiz", emotion="Nötr",
+                time_validity="Hata.", polarization_risk=15,
+                echo_chamber="Hata.", ai_rewrite="Hata.",
+                social_risk_summary="Thread hatası nedeniyle analiz yapılamadı.",
+                claims=[], context="Hata.",
+                sources=[], supporting_sources=[], contradicting_sources=[],
+                image_text="", image_toxicity=ToxicityAnalysis(),
+                image_moderation_note="Hata.", source_analysis=SourceAnalysis(),
+            )
         
         # Get image analysis result
         if future_image:
-            image_analysis = future_image.result()
-            if image_analysis:
-                image_ai_probability = safe_score(image_analysis.get("ai_probability"))
-                image_is_ai = image_analysis.get("is_ai")
+            try:
+                image_analysis = future_image.result()
+                if image_analysis:
+                    image_analysis_available = bool(image_analysis.get("image_analysis_available", False))
+                    image_ai_probability = safe_score(
+                        image_analysis.get("image_ai_probability", image_analysis.get("ai_probability"))
+                    )
+                    image_is_ai = image_analysis.get("is_ai")
+                    image_text = str(image_analysis.get("visible_text", "") or "").strip()
+                    try:
+                        image_toxicity = ToxicityAnalysis(**(image_analysis.get("image_toxicity") or {}))
+                    except Exception:
+                        image_toxicity = ToxicityAnalysis()
+                    image_moderation_note = str(
+                        image_analysis.get("image_analysis_reasoning", "") or ""
+                    ).strip()
+            except Exception as e:
+                print(f"[TruthLens] Image analysis thread error: {e}")
+                image_analysis_available = False
                 
         # Get source analysis result
         if future_source:
-            source_analysis = future_source.result()
+            try:
+                source_analysis = future_source.result()
+            except Exception as e:
+                print(f"[TruthLens] Source analysis thread error: {e}")
+                source_analysis = SourceAnalysis()
+
+    # Görseldeki argo/hakaret/nefret sinyalini metin toksisitesiyle birleştir.
+    # Görsel AI olasılığı tek başına moderasyon sebebi değildir; yalnızca görsel
+    # metni veya görsel güvenlik sınıfları sinyal ürettiğinde karar yükseltilir.
+    # HER ZAMAN merge yapıyoruz, image_toxicity her zaman set edilmiştir
+    combined_toxicity = merge_toxicity_signals(result.toxicity, image_toxicity)
+    result = result.model_copy(update={
+        "toxicity": combined_toxicity,
+        "moderation": decide_moderation_action(combined_toxicity),
+        "image_text": image_text,
+        "image_toxicity": image_toxicity,
+        "image_moderation_note": image_moderation_note,
+    })
 
     # Kaynak zincirindeki doğrulanmış adayları ana destekleyen kaynaklar
     # bölümüne de aktar. Böylece alt bölüm boş kalmaz; ancak gerçek bir
@@ -2763,16 +3061,46 @@ def analyze(request_body: AnalysisRequest, request: Request):
             result = result.model_copy(update={
                 "supporting_sources": [
                     Source(
-                        title=(c.source or "Birincil kaynak"),
+                        title=(c.source or "Kaynak adayı"),
                         url=c.url,
-                        relevance=f"İçerikle eşleşme %{c.match_probability}; birincil olasılık %{c.primary_probability}.",
+                        relevance=(
+                            f"İçerikle eşleşme %{c.match_probability}; "
+                            f"birincil olasılık %{c.primary_probability}."
+                        ),
                         reliability=80 if c.is_likely_primary else 70,
-                        reliability_reason="Kaynak zincirinde içerikle en az %25 eşleşen aday.",
+                        reliability_reason=(
+                            "Kaynak zincirinde içerikle en az %25 eşleşen aday; "
+                            "LLM doğrulaması tamamlanmış olabilir veya bekliyor olabilir."
+                        ),
                     )
                     for c in support_candidates
                     if c.url
                 ]
             })
+
+        # LLM değerlendirmesi timeout olsa bile Tavily’den gelen adayları boş bırakma.
+        # Bunlar doğrulanmış kaynak değil, açıkça etiketlenmiş inceleme adaylarıdır.
+        if not result.sources and chain:
+            candidate_sources = sorted(
+                [c for c in chain if c.url and c.match_probability >= 10],
+                key=lambda c: (c.match_probability, c.primary_probability),
+                reverse=True,
+            )[:4]
+            if candidate_sources:
+                result = result.model_copy(update={
+                    "sources": [
+                        Source(
+                            title=f"{c.source or c.author or 'Kaynak adayı'} — aday",
+                            url=c.url,
+                            relevance=f"İçerikle eşleşme %{c.match_probability}; doğrulama durumu: aday.",
+                            reliability=0,
+                            reliability_reason=(
+                                "Tavily adayı; birincil kaynak doğrulaması tamamlanmadı."
+                            ),
+                        )
+                        for c in candidate_sources
+                    ]
+                })
 
     content_hash = analysis_cache_key(analyzed_content, source_url)
     result = result.model_copy(update={
@@ -2780,6 +3108,9 @@ def analyze(request_body: AnalysisRequest, request: Request):
         "image_ai_probability": image_ai_probability,
         "image_is_ai": image_is_ai,
         "image_analysis_available": image_analysis_available,
+        "image_text": image_text,
+        "image_toxicity": image_toxicity,
+        "image_moderation_note": image_moderation_note,
         "source_analysis": source_analysis if isinstance(source_analysis, SourceAnalysis) else SourceAnalysis(**source_analysis),
     })
 
@@ -2995,16 +3326,14 @@ def analyze_image(payload: ImageAnalysisRequest):
     if not image_url:
         raise HTTPException(status_code=400, detail="Görsel URL gerekli.")
 
-    result = detect_ai_image(image_url)
-    if not result:
-        return ImageAnalysis(
-            image_ai_probability=0,
-            image_is_ai=None,
-            image_url=image_url,
-        )
+    result = analyze_image_ai_probability(image_url, source_url)
     return ImageAnalysis(
-        image_ai_probability=safe_score(result.get("ai_probability")),
+        image_ai_probability=safe_score(result.get("image_ai_probability")),
         image_is_ai=result.get("is_ai"),
+        image_analysis_available=bool(result.get("image_analysis_available", False)),
+        image_analysis_reasoning=str(result.get("image_analysis_reasoning", "") or ""),
+        visible_text=str(result.get("visible_text", "") or ""),
+        image_toxicity=ToxicityAnalysis(**(result.get("image_toxicity") or {})),
         image_url=image_url,
     )
 

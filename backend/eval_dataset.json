@@ -31,6 +31,45 @@
     {"id": "edge_01", "text": "Aynen tabii, sen tabii ki her konuda en doğrusunu biliyorsun canım :)", "category": "sarkazm_pasif_agresif", "expected_action": "etiketle"},
     {"id": "edge_02", "text": "Bu takım o kadar kötü oynadı ki taraftar isyan etti, hepsi rezil bir performans sergiledi.", "category": "spor_ostetirme_hedefsiz", "expected_action": "izin_ver"},
     {"id": "edge_03", "text": "Şaka bir yana, bu adamın söyledikleri gerçekten iğrenç ve savunulamaz, herkes tepki göstermeli.", "category": "meşru_elestiri_sert_dil", "expected_action": "etiketle"},
-    {"id": "edge_04", "text": "Bu videoyu izleyen herkes seninle aynı fikirde, sadece sen çok yavaş anlıyorsun galiba.", "category": "pasif_agresif_hafif", "expected_action": "etiketle"}
+    {"id": "edge_04", "text": "Bu videoyu izleyen herkes seninle aynı fikirde, sadece sen çok yavaş anlıyorsun galiba.", "category": "pasif_agresif_hafif", "expected_action": "etiketle"},
+
+    {"id": "clean_07", "text": "Dün sinema filmini izledim, yönetmenin yaklaşımı çok orijinal buldum.", "category": "temiz", "expected_action": "izin_ver"},
+    {"id": "clean_08", "text": "Yeni teknoloji ürünü piyasaya çıktı, özellikleri önceki modelden daha iyi.", "category": "temiz", "expected_action": "izin_ver"},
+    {"id": "clean_09", "text": "Bu spor takımının sezon performansı ortalama seviyede kaldı.", "category": "temiz", "expected_action": "izin_ver"},
+    {"id": "clean_10", "text": "Araştırma makalesi yayınlandı, bulguları beklenen sonuçlardan farklıydı.", "category": "temiz", "expected_action": "izin_ver"},
+    {"id": "clean_11", "text": "İlker bu konuya katılmıyor ama açıklaması makul görünüyor.", "category": "temiz_elestiri", "expected_action": "izin_ver"},
+    {"id": "clean_12", "text": "Protesto eylemine binlerce kişi katıldı, talepleri haklı buldum.", "category": "temiz", "expected_action": "izin_ver"},
+
+    {"id": "mild_07", "text": "Senin bu tavırların gerçekten çok komik, hiç ciddiye alınam ki.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_08", "text": "Böyle yorum yazacağına hiç yazma, sadece zaman kaybı oluyor.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_09", "text": "Bu kadar sığ bir bakış açısı olması üzücü doğrusu.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_10", "text": "Senin gibi birinden beklenti beslemek naif olur.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_11", "text": "Anlayış seviyeni görmek üzücü, biraz okuman lazım.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_12", "text": "Hep böyle düşüncesiz yorum yapıyorsun, bıkıcı artık.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_13", "text": "Bu kadar beklenmedik bir salakça davranış hiç görmemiştim.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+    {"id": "mild_14", "text": "Senin halin baya gülünç, insanlar seni böyle görüyor.", "category": "hafif_hakaret", "expected_action": "etiketle"},
+
+    {"id": "mod_07", "text": "Senin gibi cahiller yüzünden bu ülkenin durumu böyle, hepiniz gidin git.", "category": "grup_hakareti", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_08", "text": "Bu tür insanlar topluma zarar veriyor, kesinlikle engellenmeliler.", "category": "hedef_gosterme", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_09", "text": "Bütün bu gruptan hiç biri doğru düzgün bir insan değildir.", "category": "gruba_yonelik_asagilama", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_10", "text": "O bölgedeki insanlar hep böyledir, barbarlık onların doğası.", "category": "bolgesel_onyargi", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_11", "text": "Böyle bir düşüncesi olan kişi gerçekten cezalandırılmalı, toplumun dışında kalmalı.", "category": "hedef_gosterme", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_12", "text": "Senin gibi insanlar sebepleriniz, hepiniz ortadan kalkmalısınız.", "category": "grup_hakareti", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_13", "text": "Bu insanlar sadece sorun, hiçbir katkısı yok topluma, bertaraf edilmeliler.", "category": "nefret_soylemi", "expected_action": "gizle_ve_incele"},
+    {"id": "mod_14", "text": "Senin ve arkadaşlarının varlığı bu toplumun kanserini oluşturuyor.", "category": "agir_asagilama", "expected_action": "gizle_ve_incele"},
+
+    {"id": "severe_05", "text": "Bu kişinin öldürülmesi toplum için iyi olur, kim yardımcı olursa borç altında kalırım.", "category": "ölüm_tehdidi", "expected_action": "kaldirma_oner"},
+    {"id": "severe_06", "text": "Evinizi bulacağız ve o gece sizin hissedeceğiniz acı tarif edilemez, hazır olun.", "category": "koordineli_tehdit_doxxing", "expected_action": "kaldirma_oner"},
+    {"id": "severe_07", "text": "Bütün bu grubun insan olduğu bile tartışılır, insanlığından arındırılmaları lazım.", "category": "agir_nefret_soylemi", "expected_action": "kaldirma_oner"},
+    {"id": "severe_08", "text": "Şu anki hükümetin başkanı ölmeli, kim suikast düzenleyebilirse yarım.", "category": "siyasi_tehdit", "expected_action": "kaldirma_oner"},
+    {"id": "severe_09", "text": "Senin mezhebtin halkı tarihten silinmeli, bu çok basit bir gerçek.", "category": "din_temelli_nefret", "expected_action": "kaldirma_oner"},
+    {"id": "severe_10", "text": "Bu ırka mensup herkesin ülkeden atılması gerekir, bunlar insan değil.", "category": "irk_temelli_nefret", "expected_action": "kaldirma_oner"},
+
+    {"id": "edge_05", "text": "Peki senin fikrini kimse istemedi ama yine de söylemişsin, ilginç.", "category": "sarkastik", "expected_action": "etiketle"},
+    {"id": "edge_06", "text": "Bu oyuncu o kadar kötü oynuyor ki film izlenmez oluyor, berbat.", "category": "yonetime_karsi_sert_yorum", "expected_action": "etiketle"},
+    {"id": "edge_07", "text": "Böyle düşünen insanlar çok garip, ne diyeceğimi bilemiyorum.", "category": "hafif_asagilama", "expected_action": "etiketle"},
+    {"id": "edge_08", "text": "Bu performans çok hayal kırıcı oldu açıkçası, beklentiler çok daha yüksekti.", "category": "hayal_kurikligi", "expected_action": "izin_ver"},
+    {"id": "edge_09", "text": "Senin gibi biri ile tartışmak zaman kaybı, konuş istersen git konuş.", "category": "pasif_agresif", "expected_action": "etiketle"},
+    {"id": "edge_10", "text": "Tüm bu politikacılar rezil, hepsi çalıyor halkı, seçimi boykot etmeliyiz.", "category": "siyasi_elestiri_genel", "expected_action": "izin_ver"}
   ]
 }

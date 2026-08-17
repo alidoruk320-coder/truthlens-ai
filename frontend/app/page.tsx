@@ -72,6 +72,9 @@ interface AnalysisResult {
   image_ai_probability?: number;
   image_analysis_available?: boolean;
   image_analysis_reasoning?: string;
+  image_text?: string;
+  image_toxicity?: ToxicityResult;
+  image_moderation_note?: string;
   source_analysis?: {
     source_status?: string;
     source_probability?: number;
@@ -624,7 +627,14 @@ export default function Home() {
       console.error(err);
 
       if (err instanceof Error) {
-        setError(err.message);
+        const message = err.message;
+        if (message.includes("Gönderinin içeriğine erişilemedi") || message.includes("okunabilir gönderi içeriği")) {
+          setError(
+            "Bu sosyal medya gönderisinin metnine erişilemedi. Hesap gizli olabilir veya platform dış erişimi engelliyor olabilir. Gönderi metnini buraya yapıştırabilir ya da doğrudan görsel URL’sini Görsel Analizi alanında deneyebilirsin."
+          );
+        } else {
+          setError(message);
+        }
       } else {
         setError(
           "Analiz sırasında bir hata oluştu. Backend'in çalıştığından emin ol."
@@ -1490,6 +1500,19 @@ export default function Home() {
                     <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">{result.moderation.requires_human_review ? "İnsan incelemesi gerekli" : "Otomatik ön değerlendirme"}</span>
                     {result.moderation.appeal_eligible && <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-amber-300">İtiraza açık</span>}
                   </div>
+                  {result.image_toxicity && (Math.max(result.image_toxicity.insult, result.image_toxicity.bullying, result.image_toxicity.hate_speech) > 0 || result.image_text) && (
+                    <div className="mt-4 rounded-xl border border-orange-500/40 bg-orange-500/10 p-4 text-sm text-orange-100">
+                      <div className="font-bold text-orange-200">Görsel kaynaklı moderasyon sinyali</div>
+                      <p className="mt-2 leading-6">Görseldeki metin/güvenlik sinyali metin analizine eklenerek moderasyon kararına dahil edildi.</p>
+                      {result.image_text && <p className="mt-2 rounded-lg border border-orange-500/20 bg-slate-950/40 p-2 text-xs text-orange-100">Görselde okunan metin: “{result.image_text}”</p>}
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                        <span className="rounded-lg bg-slate-950/40 p-2">Hakaret: %{result.image_toxicity.insult}</span>
+                        <span className="rounded-lg bg-slate-950/40 p-2">Zorbalık: %{result.image_toxicity.bullying}</span>
+                        <span className="rounded-lg bg-slate-950/40 p-2">Nefret: %{result.image_toxicity.hate_speech}</span>
+                      </div>
+                      <p className="mt-2 text-xs text-orange-200">{result.image_toxicity.context_note}</p>
+                    </div>
+                  )}
                   {result.moderation.appeal_eligible && (
                     <div className="mt-5 border-t border-slate-800 pt-5">
                       <div className="text-sm font-semibold text-slate-200">Bu moderasyon kararına itiraz et</div>
@@ -1566,23 +1589,27 @@ export default function Home() {
 
             </Card>
 
-            {result.image_analysis_available && (
-              <Card title="Görsel Analizi">
-                <div className="space-y-3">
-                  <div className="text-sm text-slate-400">
-                    AI Görsel İhtimali
-                  </div>
-                  <div className="text-3xl font-bold text-cyan-300">
-                    {result.image_ai_probability ?? 0}/100
-                  </div>
-                  <p className="leading-7 text-slate-300">
-                    {result.image_analysis_reasoning || "Görsel analizi tamamlandı."}
-                  </p>
+            <Card title="Görsel Analizi">
+              <div className="space-y-3">
+                <div className="text-sm text-slate-400">
+                  AI Görsel İhtimali
                 </div>
-              </Card>
-            )}
+                <div className="text-3xl font-bold text-cyan-300">
+                  {result?.image_analysis_available ? `${result.image_ai_probability ?? 0}/100` : "Kullanılamadı"}
+                </div>
+                <p className="leading-7 text-slate-300">
+                  {result?.image_moderation_note || result?.image_analysis_reasoning || "Sightengine/vision görsel analizi bu içerik için kullanılamadı; bu durum görselin AI olmadığı anlamına gelmez."}
+                </p>
+                {result?.image_text && (
+                  <div className="mt-3 rounded-lg border border-blue-500/20 bg-slate-950/40 p-3 text-sm text-slate-200">
+                    <div className="text-xs text-blue-400 mb-1">Görselde okunan metin:</div>
+                    <div>"{result.image_text}"</div>
+                  </div>
+                )}
+              </div>
+            </Card>
 
-            {hasSourceAnalysis && result.source_analysis && (
+            {result?.source_analysis && (
               <Card title="Kaynak Zinciri">
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -1640,7 +1667,14 @@ export default function Home() {
 
                   <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-300">
                     <div className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Durum</div>
-                    {result.source_analysis.reasoning || "Kaynak zinciri kesin olarak belirlenemedi."}
+                    {result.source_analysis.source_status === "partial_error" ? (
+                      <>
+                        <div className="mb-2 font-semibold text-amber-200">Kısmi kaynak sonucu — birincil doğrulama bekliyor</div>
+                        <div>{result.source_analysis.reasoning || "Kaynak değerlendirmesi tamamlanamadı; aday bağlantılar aşağıda gösteriliyor."}</div>
+                      </>
+                    ) : (
+                      result.source_analysis.reasoning || "Kaynak zinciri kesin olarak belirlenemedi."
+                    )}
                   </div>
 
                   <button
@@ -1655,7 +1689,7 @@ export default function Home() {
                       {(result.source_analysis.source_chain || []).length > 0 ? (
                         result.source_analysis.source_chain!.map((item, index) => {
                           const hasUrl = !!item.url;
-                          if (typeof item.match_probability === "number" && item.match_probability < 20) return null;
+                          const lowMatch = typeof item.match_probability === "number" && item.match_probability < 20;
                           return (
                             <div
                               key={`${item.url || item.source}-${index}`}
@@ -1671,6 +1705,9 @@ export default function Home() {
                                       {item.author}
                                     </div>
                                   )}
+                                  <div className={`inline-flex rounded-full px-2 py-1 text-[10px] font-bold ${lowMatch ? "bg-amber-500/10 text-amber-300" : "bg-emerald-500/10 text-emerald-300"}`}>
+                                    {lowMatch ? "Düşük eşleşme — incele" : "İlgili aday kaynak"}
+                                  </div>
                                   <div className="text-xs text-slate-500">
                                     {item.date || "Tarih bilinmiyor"}
                                     {item.platform ? ` · ${item.platform}` : ""}
@@ -1698,8 +1735,8 @@ export default function Home() {
                           );
                         })
                       ) : (
-                        <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-slate-500">
-                          Birincil kaynak adayı bulunamadı.
+                        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-amber-200">
+                          Kaynak değerlendirmesi timeout nedeniyle tamamlanamadı; bu analiz için gösterilebilir aday bağlantı bulunamadı.
                         </div>
                       )}
                     </div>
