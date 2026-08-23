@@ -117,3 +117,4 @@ Thumbs.db
 # Keep source and public example configuration files tracked
 !.env.example
 !README.md
+

@@ -1,4 +1,5 @@
 import unittest
+import json
 
 from main import AnalysisResponse, ToxicityAnalysis, ModerationDecision, decide_moderation_action
 
@@ -45,7 +46,7 @@ class ToxicityAnalysisTest(unittest.TestCase):
         import main
 
         original = main.call_llm
-        main.call_llm = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("NaraRouter hatası"))
+        main.call_llm = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Google Gemini hatası"))
         try:
             result = main.run_analysis("Bu içerik analize ediliyor.")
             self.assertIsInstance(result, AnalysisResponse)
@@ -53,6 +54,62 @@ class ToxicityAnalysisTest(unittest.TestCase):
             self.assertIn("beklemede", result.explanation.lower())
         finally:
             main.call_llm = original
+
+    def test_run_analysis_returns_explicit_fallback_without_fake_toxicity_scores(self):
+        import main
+
+        original = main.call_llm
+        original_predict = main.TOXICITY_SERVICE.predict
+        original_insult = main.INSULT_SERVICE.predict
+        original_bullying = main.BULLYING_SERVICE.predict
+        original_hate = main.HATE_SERVICE.predict
+        unavailable = lambda text: {"available": False, "engine": "fallback", "raw": {}}
+        main.TOXICITY_SERVICE.predict = lambda text: {"available": False, "label": "notoxic", "confidence": 0.0}
+        main.INSULT_SERVICE.predict = unavailable
+        main.BULLYING_SERVICE.predict = unavailable
+        main.HATE_SERVICE.predict = unavailable
+        main.call_llm = lambda *args, **kwargs: json.dumps({
+            "score": 50,
+            "manipulation": 0,
+            "clickbait": 0,
+            "result": "Kanıt yetersiz",
+            "explanation": "test",
+            "score_breakdown": "test",
+            "validity": "Belirsiz",
+            "emotion": "Nötr",
+            "time_validity": "test",
+            "polarization_risk": 0,
+            "echo_chamber": "test",
+            "ai_rewrite": "test",
+            "social_risk_summary": "test",
+            "toxicity": {
+                "insult": 0,
+                "bullying": 0,
+                "hate_speech": 0,
+                "targeted_person_or_group": "Genel",
+                "risk_level": "Düşük",
+                "context_note": "test",
+            },
+            "claims": [],
+            "context": "test",
+            "sources": [],
+            "supporting_sources": [],
+            "contradicting_sources": [],
+        })
+        try:
+            result = main.run_analysis("bu salak bile biri oldu")
+            self.assertEqual(result.toxicity.insult, 0)
+            self.assertEqual(result.toxicity.bullying, 0)
+            self.assertEqual(result.toxicity.hate_speech, 0)
+            self.assertIn("skor üretilmedi", result.toxicity.context_note.lower())
+            self.assertEqual(result.toxicity_engine, "fallback")
+            self.assertEqual(result.moderation.action, "izin_ver")
+        finally:
+            main.call_llm = original
+            main.TOXICITY_SERVICE.predict = original_predict
+            main.INSULT_SERVICE.predict = original_insult
+            main.BULLYING_SERVICE.predict = original_bullying
+            main.HATE_SERVICE.predict = original_hate
 
     def test_demo_feed_has_posts_and_summary(self):
         from main import build_demo_feed, summarize_demo_feed

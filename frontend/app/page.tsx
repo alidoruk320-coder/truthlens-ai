@@ -18,6 +18,11 @@ interface ToxicityResult {
   risk_level: string;
   context_note: string;
 }
+interface AuxiliaryToxicityModels {
+  insult?: { score?: number; engine?: string; available?: boolean; error?: string; raw?: Record<string, number> };
+  bullying?: { score?: number; gender_bullying?: number; racist_bullying?: number; harassment?: number; neutral?: number; engine?: string; available?: boolean; error?: string; raw?: Record<string, number> };
+  hate_speech?: { engine?: string; available?: boolean; error?: string; raw?: Record<string, number> };
+}
 
 interface ModerationResult {
   action: "izin_ver" | "etiketle" | "gizle_ve_incele" | "kaldirma_oner";
@@ -62,6 +67,7 @@ interface AnalysisResult {
   ai_rewrite: string;
   social_risk_summary: string;
   toxicity?: ToxicityResult;
+  toxicity_models?: AuxiliaryToxicityModels;
   moderation?: ModerationResult;
   verification?: VerificationBadge;
   claims: string[];
@@ -75,6 +81,21 @@ interface AnalysisResult {
   image_text?: string;
   image_toxicity?: ToxicityResult;
   image_moderation_note?: string;
+  toxicity_label?: "toxic" | "notoxic";
+  toxicity_confidence?: number;
+  toxicity_engine?: "model" | "fallback";
+  claim?: string;
+  truthfulness?: string;
+  truthfulness_confidence?: number;
+  evidence?: { title: string; url: string; relation: string }[];
+  pipeline_status?: {
+    toxicity_model?: string;
+    gemini_claim_extraction?: string;
+    tavily?: { status?: string; count?: number; query?: string; error?: string };
+    gemini_final_reasoning?: string;
+    claim_detected?: boolean;
+    message?: string;
+  };
   source_analysis?: {
     source_status?: string;
     source_probability?: number;
@@ -207,6 +228,17 @@ export default function Home() {
   const [likedPostIds, setLikedPostIds] = useState<Set<string>>(new Set());
   const [socialActionStatus, setSocialActionStatus] = useState("");
   const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+  const insultModel = result?.toxicity_models?.insult;
+  const bullyingModel = result?.toxicity_models?.bullying;
+  const hateModel = result?.toxicity_models?.hate_speech;
+  const insultScoreText = typeof insultModel?.score === "number" ? `${insultModel.score.toFixed(2)}%` : Object.keys(insultModel?.raw ?? {}).length > 0 ? "Model kullanılamadı" : "Model kullanılamadı";
+  const bullyingScoreText = typeof bullyingModel?.score === "number" ? `${bullyingModel.score.toFixed(2)}%` : Object.keys(bullyingModel?.raw ?? {}).length > 0 ? "Model kullanılamadı" : "Model kullanılamadı";
+  const hateRawEntries = Object.entries(hateModel?.raw ?? {});
+  const hateLabelDisplay: Record<string, string> = {
+    LABEL_0: "Nötr / normal içerik",
+    LABEL_1: "Saldırgan / aşağılayıcı içerik",
+    LABEL_2: "Nefret söylemi",
+  };
 
   const safetyScore = result?.score ?? 0;
   const riskTrend = user ? Math.max(0, Math.min(100, Math.round(100 - safetyScore))) : 0;
@@ -609,7 +641,26 @@ export default function Home() {
         );
       }
 
-      setResult(data);
+      const nestedInsult = data?.toxicity_models?.insult?.raw?.INSULT;
+      const nestedBullying = data?.toxicity_models?.bullying?.score;
+      const mappedData: AnalysisResult = {
+        ...data,
+        toxicity: data?.toxicity
+          ? {
+              ...data.toxicity,
+              insult: typeof nestedInsult === "number" ? nestedInsult : data.toxicity.insult,
+              bullying: typeof nestedBullying === "number" ? nestedBullying : data.toxicity.bullying,
+            }
+          : data.toxicity,
+      };
+      console.info("[TruthLens] /analyze toxicity mapping", {
+        general: { label: data?.toxicity_label, confidence: data?.toxicity_confidence, engine: data?.toxicity_engine },
+        insult: data?.toxicity_models?.insult?.raw,
+        bullying: data?.toxicity_models?.bullying?.raw,
+        hate_speech: data?.toxicity_models?.hate_speech?.raw,
+        mapped_ui: mappedData.toxicity,
+      });
+      setResult(mappedData);
 
       if (token) {
         const historyResponse = await fetch(`${API_BASE_URL}/history`, {
@@ -1455,18 +1506,40 @@ export default function Home() {
 
             {result.toxicity && (
               <Card title="Bağlamsal toksisite analizi">
+                <div className="mb-4 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200">
+                    {result.toxicity_engine === "model" ? "Fine-tuned BERT + LoRA" : "Fallback (model unavailable)"}: {result.toxicity_label === "toxic" ? "toxic" : "notoxic"}
+                  </span>
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-300">
+                    Binary model confidence: %{((result.toxicity_confidence ?? 0) * 100).toFixed(2)}
+                  </span>
+                  <span className="text-xs text-slate-500">Kalibre edilmiş kesinlik değildir.</span>
+                </div>
+                <p className="mb-4 text-xs text-slate-500">General toxicity binary BERT+LoRA’dan gelir. Hakaret ve zorbaca davranış ayrı auxiliary modellerden; nefret dili ise mapping uydurulmadan raw LABEL olasılıklarıyla gösterilir.</p>
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
                     <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Hakaret</div>
-                    <div className="mt-2 text-2xl font-bold text-red-300">{result.toxicity.insult}%</div>
+                    <div className="mt-2 text-2xl font-bold text-red-300">
+                      {insultScoreText}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500">Kaynak: {insultModel?.engine ?? "fallback"}</div>
                   </div>
                   <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
                     <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Zorbaca davranış</div>
-                    <div className="mt-2 text-2xl font-bold text-orange-300">{result.toxicity.bullying}%</div>
+                    <div className="mt-2 text-2xl font-bold text-orange-300">
+                      {bullyingScoreText}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500">Kaynak: {bullyingModel?.engine ?? "fallback"}</div>
                   </div>
                   <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
-                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Nefret dili</div>
-                    <div className="mt-2 text-2xl font-bold text-amber-300">{result.toxicity.hate_speech}%</div>
+                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Nefret dili · raw</div>
+                    <div className="mt-2 space-y-1 text-sm font-semibold text-amber-300">
+                      {hateRawEntries.length > 0
+                        ? hateRawEntries.map(([label, value]) => <div key={label}>{hateLabelDisplay[label] ?? label}: {Number(value).toFixed(2)}%</div>)
+                        : <div>Model kullanılamadı</div>}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500">Kaynak: {hateModel?.engine ?? "fallback"}</div>
+                    <div className="mt-1 text-[11px] leading-5 text-slate-600">Not: Bu adlar modelin sınıf etiketlerine karşılık gelen kullanıcı dostu açıklamalardır.</div>
                   </div>
                 </div>
 
@@ -1478,6 +1551,16 @@ export default function Home() {
                     {result.toxicity.risk_level}
                   </div>
                   <p className="mt-3 leading-6 text-slate-400">{result.toxicity.context_note}</p>
+                </div>
+              </Card>
+            )}
+
+            {result.toxicity_models && (
+              <Card title="Ayrı toxicity modelleri">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs text-slate-300"><div className="font-semibold text-white">Insult Model</div><div className="mt-1">Skor: {result.toxicity_models.insult?.available ? `%${(result.toxicity_models.insult?.score ?? 0).toFixed(2)}` : "Model kullanılamadı"}</div><div className="mt-1 text-slate-500">{result.toxicity_models.insult?.available ? (result.toxicity_models.insult?.engine ?? "unknown") : "fallback"}</div>{result.toxicity_models.insult?.error && <div className="mt-1 text-slate-600">{result.toxicity_models.insult.error}</div>}</div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs text-slate-300"><div className="font-semibold text-white">Bullying Model</div><div className="mt-1">Skor: {result.toxicity_models.bullying?.available ? `%${(result.toxicity_models.bullying?.score ?? 0).toFixed(2)}` : "Model kullanılamadı"}</div><div className="mt-1 text-slate-500">Nötr: %{(result.toxicity_models.bullying?.neutral ?? 0).toFixed(2)}</div><div className="mt-1 text-slate-500">Cinsiyetçi: %{(result.toxicity_models.bullying?.gender_bullying ?? 0).toFixed(2)}</div><div className="mt-1 text-slate-500">Irkçılık: %{(result.toxicity_models.bullying?.racist_bullying ?? 0).toFixed(2)}</div><div className="mt-1 text-slate-500">Kızdırma/Hakaret: %{(result.toxicity_models.bullying?.harassment ?? 0).toFixed(2)}</div><div className="mt-1 text-slate-500">{result.toxicity_models.bullying?.available ? (result.toxicity_models.bullying?.engine ?? "unknown") : "fallback"}</div>{result.toxicity_models.bullying?.error && <div className="mt-1 text-slate-600">{result.toxicity_models.bullying.error}</div>}</div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs text-slate-300"><div className="font-semibold text-white">Hate Speech Model</div>{result.toxicity_models.hate_speech?.available ? Object.entries(result.toxicity_models.hate_speech?.raw ?? {}).map(([label, value]) => <div key={label} className="mt-1 text-slate-500">{hateLabelDisplay[label] ?? label}: %{Number(value).toFixed(2)}</div>) : <div className="mt-1 text-slate-500">Model kullanılamadı</div>}<div className="mt-1 text-slate-500">{result.toxicity_models.hate_speech?.available ? (result.toxicity_models.hate_speech?.engine ?? "unknown") : "fallback"}</div><div className="mt-1 text-[11px] leading-5 text-slate-600">Not: Bu etiketler modelin sınıf açıklamalarıdır; ham `LABEL_*` isimleri kullanıcı dostu biçime çevrilmiştir.</div>{result.toxicity_models.hate_speech?.error && <div className="mt-1 text-slate-600">{result.toxicity_models.hate_speech.error}</div>}</div>
                 </div>
               </Card>
             )}
@@ -1608,6 +1691,32 @@ export default function Home() {
                 )}
               </div>
             </Card>
+
+            {result.pipeline_status && (
+              <Card title="AI pipeline durumu">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500">BERT+LoRA toxicity</div>
+                    <div className="mt-2 font-semibold text-cyan-300">{result.pipeline_status.toxicity_model || "bilinmiyor"}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Gemini claim</div>
+                    <div className="mt-2 font-semibold text-violet-300">{result.pipeline_status.gemini_claim_extraction || "bilinmiyor"}</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Tavily evidence</div>
+                    <div className="mt-2 font-semibold text-amber-300">{result.pipeline_status.tavily?.status || "bilinmiyor"} · {result.pipeline_status.tavily?.count ?? 0} kaynak</div>
+                  </div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                    <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Gemini final</div>
+                    <div className="mt-2 font-semibold text-emerald-300">{result.pipeline_status.gemini_final_reasoning || "bilinmiyor"}</div>
+                  </div>
+                </div>
+                <p className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
+                  {result.pipeline_status.message || "Pipeline durumu mevcut değil."}
+                </p>
+              </Card>
+            )}
 
             {result?.source_analysis && (
               <Card title="Kaynak Zinciri">
@@ -1795,9 +1904,14 @@ export default function Home() {
 
               <Card title="Destekleyen kaynaklar">
 
-                {result.supporting_sources && result.supporting_sources.length > 0 ? (
-
-                  <div className="space-y-3">
+                                  {result.claim && (
+                    <div className="mb-4 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-sm text-cyan-100">
+                      <div className="text-xs uppercase tracking-[0.2em] text-cyan-300">İncelenen ana iddia</div>
+                      <p className="mt-2 leading-6">{result.claim}</p>
+                    </div>
+                  )}
+                  {result.supporting_sources && result.supporting_sources.length > 0 ? (
+                    <div className="space-y-3">
 
                     {result.supporting_sources.map((source, index) => (
 

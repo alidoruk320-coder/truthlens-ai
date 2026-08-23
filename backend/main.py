@@ -8,7 +8,7 @@ import threading
 import concurrent.futures
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 from io import BytesIO
@@ -19,8 +19,20 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from openai import OpenAI
 from tavily import TavilyClient
+
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    from peft import PeftModel
+except Exception:
+    torch = None
+    AutoTokenizer = None
+    AutoModelForSequenceClassification = None
+    PeftModel = None
+    MODEL_IMPORT_ERROR = "torch/transformers/peft bağımlılıkları import edilemedi."
+else:
+    MODEL_IMPORT_ERROR = ""
 from atproto import Client
 
 try:
@@ -32,8 +44,17 @@ except Exception:
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-NARAROUTER_API_KEY = os.getenv("NARAROUTER_API_KEY")
-NARAROUTER_MODEL = os.getenv("NARAROUTER_MODEL", "laguna-s-2.1")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
+TOXICITY_MODEL_ID = os.getenv("TOXICITY_MODEL_ID", "Doruk2404/truthlens-toxic-lora")
+TOXICITY_BASE_MODEL = os.getenv("TOXICITY_BASE_MODEL", "dbmdz/bert-base-turkish-cased")
+HF_TOKEN = os.getenv("HF_TOKEN") or None
+TOXICITY_MAX_LENGTH = int(os.getenv("TOXICITY_MAX_LENGTH", "256"))
+INSULT_MODEL_ID = os.getenv("INSULT_MODEL_ID", "nanelimon/bert-base-turkish-offensive")
+BULLYING_MODEL_ID = os.getenv("BULLYING_MODEL_ID", "nanelimon/bert-base-turkish-bullying")
+HATE_MODEL_ID = os.getenv("HATE_MODEL_ID", "ctoraman/hate-speech-berturk")
+AUXILIARY_MODEL_MAX_LENGTH = int(os.getenv("AUXILIARY_MODEL_MAX_LENGTH", "256"))
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 SIGHTENGINE_API_USER = (
     os.getenv("SIGHTENGINE_API_USER")
@@ -76,7 +97,9 @@ app.add_middleware(
 # ============================================================
 
 class AnalysisRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=10000)
+    # Frontend mevcut sözleşmede content kullanır; teknik örneklerdeki text de kabul edilir.
+    content: Optional[str] = Field(default=None, min_length=1, max_length=10000)
+    text: Optional[str] = Field(default=None, min_length=1, max_length=10000)
 
 class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -126,6 +149,14 @@ class ToxicityAnalysis(BaseModel):
     targeted_person_or_group: str = "Genel"
     risk_level: str = "Düşük"
     context_note: str = "Bağlam değerlendirmesi yapılmadı."
+
+
+class AuxiliaryToxicityModels(BaseModel):
+    insult: Dict[str, Any] = Field(default_factory=dict)
+    bullying: Dict[str, Any] = Field(default_factory=dict)
+    hate_speech: Dict[str, Any] = Field(default_factory=dict)
+    available: bool = False
+    error: str = ""
 
 
 class ImageAnalysis(BaseModel):
@@ -180,6 +211,7 @@ class AnalysisResponse(BaseModel):
     ai_rewrite: str
     social_risk_summary: str
     toxicity: ToxicityAnalysis = Field(default_factory=ToxicityAnalysis)
+    toxicity_models: AuxiliaryToxicityModels = Field(default_factory=AuxiliaryToxicityModels)
     moderation: ModerationDecision = Field(default_factory=ModerationDecision)
     verification: VerificationBadge = Field(default_factory=VerificationBadge)
 
@@ -196,8 +228,315 @@ class AnalysisResponse(BaseModel):
     image_toxicity: ToxicityAnalysis = Field(default_factory=ToxicityAnalysis)
     image_moderation_note: str = ""
     source_analysis: SourceAnalysis = Field(default_factory=SourceAnalysis)
+    # Yeni pipeline alanları; mevcut TruthLens kartlarıyla geriye dönük uyumludur.
+    toxicity_label: str = "notoxic"
+    toxicity_confidence: float = 0.0
+    claim: str = ""
+    truthfulness: str = "Kanıt yetersiz"
+    truthfulness_confidence: float = 0.0
+    evidence: List[dict] = Field(default_factory=list)
+    toxicity_engine: str = "fallback"
+    # Jüride ve hata ayıklamada provider adımlarının gerçekten çalışıp çalışmadığını gösterir.
+    pipeline_status: Dict[str, object] = Field(default_factory=dict)
 
 ANALYSIS_CACHE: Dict[str, object] = {}
+LAST_TAVILY_STATUS: Dict[str, object] = {"status": "idle", "count": 0, "query": ""}
+
+
+class ToxicityModelService:
+    """Türkçe BERT + LoRA modelini süreç başına bir kez yükler ve yeniden kullanır."""
+
+    def __init__(self) -> None:
+        self.model = None
+        self.tokenizer = None
+        self.device = "cpu"
+        self.available = False
+        self.error = ""
+        self._lock = threading.Lock()
+
+    def load_once(self) -> bool:
+        if self.available:
+            return True
+        with self._lock:
+            if self.available:
+                return True
+            if not all((torch, AutoTokenizer, AutoModelForSequenceClassification, PeftModel)):
+                self.error = "torch/transformers/peft bağımlılıkları kurulu değil."
+                return False
+            try:
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                hf_kwargs = {"token": HF_TOKEN} if HF_TOKEN else {}
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    TOXICITY_BASE_MODEL,
+                    **hf_kwargs,
+                )
+                base = AutoModelForSequenceClassification.from_pretrained(
+                    TOXICITY_BASE_MODEL,
+                    num_labels=2,
+                    **hf_kwargs,
+                )
+                self.model = PeftModel.from_pretrained(
+                    base,
+                    TOXICITY_MODEL_ID,
+                    is_trainable=False,
+                    **hf_kwargs,
+                )
+                self.model.to(self.device)
+                self.model.eval()
+                self.available = True
+                print(
+                    f"[TruthLens] FINE_TUNED_BERT_LORA ready: {TOXICITY_MODEL_ID} "
+                    f"({TOXICITY_BASE_MODEL}) on {self.device}"
+                )
+                return True
+            except Exception as exc:
+                self.error = str(exc)
+                self.model = None
+                self.tokenizer = None
+                print(f"[TruthLens] Custom toxicity model load error: {exc}")
+                return False
+
+    def predict(self, text: str) -> dict:
+        if not self.load_once() or not text.strip():
+            return {
+                "available": False,
+                "label": "notoxic",
+                "confidence": 0.0,
+                "error": self.error or MODEL_IMPORT_ERROR,
+            }
+        try:
+            encoded = self.tokenizer(
+                text[:10000],
+                return_tensors="pt",
+                truncation=True,
+                max_length=TOXICITY_MAX_LENGTH,
+            )
+            encoded = {key: value.to(self.device) for key, value in encoded.items()}
+            with torch.no_grad():
+                logits = self.model(**encoded).logits
+                probabilities = torch.softmax(logits, dim=-1)[0]
+            toxic_index = 1
+            id2label = getattr(self.model.config, "id2label", {}) or {}
+            for index, label in id2label.items():
+                if "toxic" in str(label).lower() or "tox" in str(label).lower():
+                    toxic_index = int(index)
+                    break
+            toxic_probability = float(probabilities[toxic_index].item())
+            label = "toxic" if toxic_probability >= 0.5 else "notoxic"
+            confidence = toxic_probability if label == "toxic" else 1.0 - toxic_probability
+            return {
+                "available": True,
+                "label": label,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "toxic_probability": toxic_probability,
+            }
+        except Exception as exc:
+            self.error = str(exc)
+            print(f"[TruthLens] Custom toxicity inference error: {exc}")
+            return {
+                "available": False,
+                "label": "notoxic",
+                "confidence": 0.0,
+                "error": self.error,
+            }
+
+
+class MultiClassModelService:
+    def __init__(self, model_id: str, engine: str) -> None:
+        self.model_id = model_id
+        self.engine = engine
+        self.model = None
+        self.tokenizer = None
+        self.device = "cpu"
+        self.available = False
+        self.error = ""
+        self.id2label: Dict[int, str] = {}
+        self._lock = threading.Lock()
+
+    def load_once(self) -> bool:
+        if self.available:
+            return True
+        with self._lock:
+            if self.available:
+                return True
+            if not all((torch, AutoTokenizer, AutoModelForSequenceClassification)):
+                self.error = "torch/transformers bağımlılıkları kurulu değil."
+                return False
+            try:
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+                hf_kwargs = {"token": HF_TOKEN} if HF_TOKEN else {}
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, **hf_kwargs)
+                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_id, **hf_kwargs)
+                self.model.to(self.device)
+                self.model.eval()
+                raw_id2label = getattr(self.model.config, "id2label", {}) or {}
+                self.id2label = {int(index): str(label) for index, label in raw_id2label.items()}
+                self.available = True
+                print(f"[TruthLens] {self.engine} ready: {self.model_id} labels={self.id2label} on {self.device}")
+                return True
+            except Exception as exc:
+                self.error = str(exc)
+                self.model = None
+                self.tokenizer = None
+                print(f"[TruthLens] {self.engine} load error ({self.model_id}): {exc}")
+                return False
+
+    def predict(self, text: str) -> dict:
+        if not self.load_once() or not text.strip():
+            return {
+                "available": False,
+                "engine": "fallback",
+                "model_id": self.model_id,
+                "raw": {},
+                "error": self.error or MODEL_IMPORT_ERROR,
+            }
+        try:
+            encoded = self.tokenizer(text[:10000], return_tensors="pt", truncation=True, max_length=AUXILIARY_MODEL_MAX_LENGTH)
+            encoded = {key: value.to(self.device) for key, value in encoded.items()}
+            with torch.no_grad():
+                probabilities = torch.softmax(self.model(**encoded).logits[0], dim=-1)
+            raw = {self.id2label.get(index, f"LABEL_{index}"): float(probabilities[index].item()) * 100 for index in range(len(probabilities))}
+            predicted_index = int(torch.argmax(probabilities).item())
+            return {
+                "available": True,
+                "engine": self.engine,
+                "model_id": self.model_id,
+                "label": self.id2label.get(predicted_index, f"LABEL_{predicted_index}"),
+                "confidence": float(probabilities[predicted_index].item()) * 100,
+                "raw": raw,
+            }
+        except Exception as exc:
+            self.error = str(exc)
+            print(f"[TruthLens] {self.engine} inference error ({self.model_id}): {exc}")
+            return {
+                "available": False,
+                "engine": "fallback",
+                "model_id": self.model_id,
+                "raw": {},
+                "error": self.error,
+            }
+
+
+TOXICITY_SERVICE = ToxicityModelService()
+INSULT_SERVICE = MultiClassModelService(INSULT_MODEL_ID, "insult_model")
+BULLYING_SERVICE = MultiClassModelService(BULLYING_MODEL_ID, "bullying_model")
+HATE_SERVICE = MultiClassModelService(HATE_MODEL_ID, "hate_model")
+
+
+def custom_text_toxicity(text: str) -> Tuple[ToxicityAnalysis, str, float, bool]:
+    """Öncelik özel modele aittir; model yoksa yalnızca kontrollü fallback kullanılır."""
+    prediction = TOXICITY_SERVICE.predict(text)
+    if not prediction.get("available"):
+        fallback = ToxicityAnalysis(
+            insult=0,
+            bullying=0,
+            hate_speech=0,
+            targeted_person_or_group="Genel",
+            risk_level="Düşük",
+            context_note="Genel toxicity modeli kullanılamadı; skor üretilmedi.",
+        )
+        return fallback, "notoxic", 0.0, False
+
+    toxic = prediction["label"] == "toxic"
+    confidence = float(prediction["confidence"])
+    if toxic:
+        # Model yalnızca binary is_toxic sınıflandırması yapar.
+        # Confidence, insult/bullying/hate_speech olasılığı değildir; bu alanlar ayrı model
+        # çıktısı olmadığı için sıfır tutulur. Moderasyon için yalnızca binary toxicity
+        # etiketi ve belirsiz/orta risk bağlamı kullanılır.
+        toxicity = ToxicityAnalysis(
+            insult=0,
+            bullying=0,
+            hate_speech=0,
+            targeted_person_or_group="Genel",
+            risk_level="Orta",
+            context_note=(
+                f"Özel Türkçe BERT+LoRA modeli binary toxic sınıfı verdi; "
+                f"toxicity confidence %{round(confidence * 100, 2)}. "
+                "Bu değer hakaret, zorbalık veya nefret söylemi olasılığı değildir."
+            ),
+        )
+    else:
+        toxicity = ToxicityAnalysis(
+            insult=0,
+            bullying=0,
+            hate_speech=0,
+            targeted_person_or_group="Genel",
+            risk_level="Düşük",
+            context_note=(
+                f"Özel Türkçe BERT+LoRA modeli binary notoxic sınıfı verdi; "
+                f"toxicity confidence %{round(confidence * 100, 2)}."
+            ),
+        )
+    return toxicity, prediction["label"], confidence, True
+
+
+def analyze_auxiliary_toxicity(text: str, general_toxicity: ToxicityAnalysis, general_label: str, general_confidence: float, general_available: bool) -> Tuple[ToxicityAnalysis, AuxiliaryToxicityModels]:
+    insult = INSULT_SERVICE.predict(text)
+    bullying = BULLYING_SERVICE.predict(text)
+    hate = HATE_SERVICE.predict(text)
+    insult_raw = insult.get("raw", {}) or {}
+    bullying_raw = bullying.get("raw", {}) or {}
+    insult_score = float(insult_raw.get("INSULT", 0.0)) if insult.get("available") else 0.0
+    neutral = float(bullying_raw.get("Nötr", 0.0)) if bullying.get("available") else 0.0
+    bullying_score = max(0.0, 100.0 - neutral) if bullying.get("available") else 0.0
+    any_model_available = general_available or insult.get("available") or bullying.get("available") or hate.get("available")
+    risk = "Yüksek" if max(insult_score, bullying_score) >= 70 else "Orta" if max(insult_score, bullying_score) >= 35 else "Düşük"
+    if any_model_available:
+        merged = ToxicityAnalysis(
+            insult=round(insult_score),
+            bullying=round(bullying_score),
+            hate_speech=0,
+            targeted_person_or_group=general_toxicity.targeted_person_or_group,
+            risk_level=risk,
+            context_note=(f"Genel toxicity: {general_label} (%{round(general_confidence * 100, 2)}). "
+                          "Insult ve bullying skorları ayrı modellerden; hate çıktısı raw olarak korunur.")
+        )
+    else:
+        merged = general_toxicity
+    return merged, AuxiliaryToxicityModels(
+        insult={
+            "score": round(insult_score, 2),
+            "engine": insult.get("engine", "fallback"),
+            "available": bool(insult.get("available")),
+            "error": insult.get("error", ""),
+            "model_id": INSULT_MODEL_ID,
+            "label": insult.get("label", ""),
+            "raw": insult_raw,
+        },
+        bullying={
+            "score": round(bullying_score, 2),
+            "gender_bullying": round(float(bullying_raw.get("Cinsiyetçi Zorbalık", 0.0)), 2),
+            "racist_bullying": round(float(bullying_raw.get("Irkçılık", 0.0)), 2),
+            "harassment": round(float(bullying_raw.get("Kızdırma/Hakaret", 0.0)), 2),
+            "neutral": round(neutral, 2),
+            "engine": bullying.get("engine", "fallback"),
+            "available": bool(bullying.get("available")),
+            "error": bullying.get("error", ""),
+            "model_id": BULLYING_MODEL_ID,
+            "label": bullying.get("label", ""),
+            "raw": bullying_raw,
+        },
+        hate_speech={
+            "engine": hate.get("engine", "fallback"),
+            "available": bool(hate.get("available")),
+            "error": hate.get("error", ""),
+            "model_id": HATE_MODEL_ID,
+            "label": hate.get("label", ""),
+            "raw": hate.get("raw", {}) or {},
+        },
+        available=any_model_available,
+        error="; ".join(
+            part
+            for part in [
+                INSULT_SERVICE.error if not insult.get("available") else "",
+                BULLYING_SERVICE.error if not bullying.get("available") else "",
+                HATE_SERVICE.error if not hate.get("available") else "",
+            ]
+            if part
+        ),
+    )
+
 
 # ============================================================
 # MODERASYON KARAR MOTORU
@@ -1151,6 +1490,16 @@ def submit_moderation_appeal(
 
 init_db()
 
+
+@app.on_event("startup")
+def preload_custom_toxicity_model() -> None:
+    # Modeller request başına değil, süreç başlangıcında bir kez yüklenir.
+    TOXICITY_SERVICE.load_once()
+    INSULT_SERVICE.load_once()
+    BULLYING_SERVICE.load_once()
+    HATE_SERVICE.load_once()
+
+
 # ============================================================
 # CACHE / DETERMINISTIC ANALYSIS
 # ============================================================
@@ -1164,7 +1513,13 @@ def stable_text(value: str) -> str:
 def analysis_cache_key(content: str, source_url: Optional[str] = None) -> str:
     normalized_content = stable_text(content)
     normalized_url = (source_url or "").strip().lower()
-    raw = f"truthlens:v3|{normalized_url}|{normalized_content}"
+    model_state = (
+        f"tox={int(TOXICITY_SERVICE.available)}:"
+        f"ins={int(INSULT_SERVICE.available)}:"
+        f"bul={int(BULLYING_SERVICE.available)}:"
+        f"hat={int(HATE_SERVICE.available)}"
+    )
+    raw = f"truthlens:v4|{normalized_url}|{normalized_content}|{model_state}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -1213,15 +1568,46 @@ def infer_time_validity_and_validity(content: str, llm_validity: str, llm_time_v
 # CLIENTS
 # ============================================================
 
-def get_llm_client() -> OpenAI:
-    if not NARAROUTER_API_KEY:
-        raise HTTPException(status_code=500, detail="NARAROUTER_API_KEY yapılandırılmamış.")
-    return OpenAI(
-        api_key=NARAROUTER_API_KEY,
-        base_url="https://router.bynara.id/v1",
-        timeout=30.0,
-        max_retries=0,
-    )
+LAST_GEMINI_STATUS: Dict[str, object] = {"status": "idle", "model": GEMINI_MODEL}
+
+
+def gemini_generate(parts: List[dict], temperature: float = 0.2) -> str:
+    """Google Gemini Developer API'ye doğrudan REST çağrısı yapar; NaraRouter yoktur."""
+    global LAST_GEMINI_STATUS
+    if not GOOGLE_API_KEY:
+        LAST_GEMINI_STATUS = {"status": "missing_api_key", "model": GEMINI_MODEL}
+        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY yapılandırılmamış.")
+    endpoint = f"{GEMINI_API_BASE.rstrip('/')}/models/{GEMINI_MODEL}:generateContent"
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "temperature": temperature,
+            "responseMimeType": "application/json",
+        },
+    }
+    try:
+        response = requests.post(
+            endpoint,
+            params={"key": GOOGLE_API_KEY},
+            json=payload,
+            timeout=45,
+        )
+        response.raise_for_status()
+        data = response.json()
+        text = "".join(
+            str(part.get("text", ""))
+            for part in ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts", [])
+            if isinstance(part, dict)
+        ).strip()
+        if not text:
+            raise RuntimeError("Gemini boş yanıt döndürdü.")
+        LAST_GEMINI_STATUS = {"status": "success", "model": GEMINI_MODEL}
+        return text
+    except Exception as exc:
+        LAST_GEMINI_STATUS = {"status": "error", "model": GEMINI_MODEL, "error": str(exc)}
+        print(f"[TruthLens] Direct Gemini error: {exc}")
+        raise
+
 
 def get_tavily_client() -> TavilyClient:
     if not TAVILY_API_KEY:
@@ -1581,34 +1967,6 @@ def ocr_image_text(image_url: str) -> str:
         return ""
 
 
-def heuristic_image_toxicity(visible_text: str) -> ToxicityAnalysis:
-    """OCR metnini ihtiyatlı bir aday sinyal olarak moderasyon kararına taşır."""
-    normalized = re.sub(r"\s+", " ", (visible_text or "").lower()).strip()
-    if not normalized:
-        return ToxicityAnalysis(context_note="Görselde okunabilir metin bulunamadı.")
-
-    strong_terms = ("siktir", "sikik", "amk", "aq", "oç", "orospu", "şerefsiz", "piç")
-    mild_terms = ("salak", "aptal", "gerizekalı", "mal", "lan")
-    strong_hits = [term for term in strong_terms if term in normalized]
-    mild_hits = [term for term in mild_terms if term in normalized]
-    if not strong_hits and not mild_hits:
-        return ToxicityAnalysis(context_note="Görsel metni okundu; bilinen argo adayı bulunmadı.")
-
-    insult = 82 if strong_hits else 55
-    risk_level = "Yüksek" if strong_hits else "Orta"
-    return ToxicityAnalysis(
-        insult=insult,
-        bullying=58 if strong_hits else 48,
-        hate_speech=0,
-        targeted_person_or_group="Genel",
-        risk_level=risk_level,
-        context_note=(
-            "OCR görsel metninde argo/hakaret adayı bulundu: "
-            + ", ".join(strong_hits or mild_hits)
-            + ". Bu sinyal insan incelemesi için değerlendirilmelidir."
-        ),
-    )
-
 
 def analyze_image_ai_probability(image_url: str, source_url: str = "") -> dict:
     if not image_url_is_reasonable(image_url):
@@ -1642,7 +2000,16 @@ def analyze_image_ai_probability(image_url: str, source_url: str = "") -> dict:
 
     # LLM başarısız olsa bile OCR ile görsel metni ve argo adayı kaybetme.
     ocr_text = ocr_image_text(image_url)
-    ocr_toxicity = heuristic_image_toxicity(ocr_text)
+    if ocr_text:
+        ocr_toxicity, _ocr_model_details = analyze_auxiliary_toxicity(
+            ocr_text,
+            ToxicityAnalysis(context_note="OCR metni dört toxicity modeliyle değerlendirildi."),
+            "notoxic",
+            0.0,
+            False,
+        )
+    else:
+        ocr_toxicity = ToxicityAnalysis(context_note="Görselde okunabilir metin bulunamadı.")
 
     # Step 2: LLM vision model'i çağır (toksisitesi ve metin extraction için)
     prompt = """
@@ -1666,25 +2033,20 @@ Yalnızca aşağıdaki JSON formatında yanıt ver:
 """
     try:
         t0_llm = time.time()
-        client = get_llm_client()
-        completion = client.chat.completions.create(
-            model=NARAROUTER_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt.strip()},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                    ],
-                }
+        image_response = requests.get(image_url, timeout=15)
+        image_response.raise_for_status()
+        image_mime = image_response.headers.get("content-type", "image/jpeg").split(";", 1)[0]
+        image_b64 = __import__("base64").b64encode(image_response.content).decode("ascii")
+        raw = gemini_generate(
+            [
+                {"text": prompt.strip()},
+                {"inline_data": {"mime_type": image_mime, "data": image_b64}},
             ],
             temperature=0.1,
-            response_format={"type": "json_object"},
         )
-        raw = completion.choices[0].message.content or ""
         data = json.loads(raw)
         dur_llm = time.time() - t0_llm
-        print(f"[TruthLens] Image LLM toxicity: {dur_llm:.2f}s")
+        print(f"[TruthLens] Direct Gemini vision: {dur_llm:.2f}s")
         
         result = {
             "image_ai_probability": ai_probability_from_sightengine,
@@ -1938,19 +2300,13 @@ def search_with_tavily(query: str, max_results: int = 5) -> List[dict]:
         return []
 
 def call_llm(messages: list, temperature: float = 0.2) -> str:
-    client = get_llm_client()
-    try:
-        completion = client.chat.completions.create(
-            model=NARAROUTER_MODEL,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=900,
-            response_format={"type": "json_object"},
-        )
-        return completion.choices[0].message.content or ""
-    except Exception as e:
-        print(f"[TruthLens] NaraRouter error: {e}")
-        raise HTTPException(status_code=502, detail=f"NaraRouter hatası: {str(e)}")
+    parts = []
+    for message in messages:
+        content = message.get("content", "") if isinstance(message, dict) else str(message)
+        if isinstance(content, list):
+            content = "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+        parts.append(str(content))
+    return gemini_generate([{"text": "\n\n".join(parts)}], temperature=temperature)
 
 def safe_score(value, default: int = 0) -> int:
     try:
@@ -2104,157 +2460,256 @@ def clean_source_list(source_list) -> List[Source]:
 # ANA ANALİZ
 # ============================================================
 
+def parse_json_object(raw: str) -> dict:
+    """LLM çıktısındaki fenced JSON veya çevre metnini güvenli biçimde ayıklar."""
+    raw = (raw or "").strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                return {}
+        return {}
+
+
+def extract_claim_with_gemini(content: str) -> dict:
+    prompt = f"""
+Sen TruthLens AI'nin claim extraction modülüsün. Türkçe metni analiz et.
+Yalnızca JSON döndür ve hiçbir iddia uydurma.
+Metin:
+{content[:2500]}
+Şema:
+{{
+  "has_claim": true,
+  "claim": "doğrulanabilir tek ana iddia veya boş metin",
+  "claims": ["iddia 1"],
+  "search_query": "Tavily için kısa, özgül Türkçe arama sorgusu"
+}}
+"""
+    try:
+        return parse_json_object(call_llm([{"role": "user", "content": prompt}], temperature=0.0))
+    except Exception as exc:
+        print(f"[TruthLens] Claim extraction fallback: {exc}")
+        return {"has_claim": False, "claim": "", "claims": [], "search_query": "", "error": str(exc)}
+
+
+def evidence_sources_for_claim(claim: str, source_url: Optional[str] = None) -> List[dict]:
+    global LAST_TAVILY_STATUS
+    if not claim.strip():
+        LAST_TAVILY_STATUS = {"status": "skipped_no_claim", "count": 0, "query": ""}
+        return []
+    try:
+        results = search_with_tavily(claim[:500], max_results=5)
+    except Exception as exc:
+        LAST_TAVILY_STATUS = {"status": "error", "count": 0, "query": claim[:500], "error": str(exc)}
+        print(f"[TruthLens] Evidence retrieval fallback: {exc}")
+        results = []
+    evidence = []
+    seen = set()
+    for item in results:
+        url = str(item.get("url", "") or "").strip()
+        if not url or normalize_url(url) in seen:
+            continue
+        seen.add(normalize_url(url))
+        title = str(item.get("title", "") or "").strip()
+        content = str(item.get("content", "") or "").strip()
+        evidence.append({"title": title, "url": url, "content": content})
+    if source_url and normalize_url(source_url) not in seen:
+        evidence.append({"title": "Mevcut paylaşım", "url": source_url, "content": ""})
+    LAST_TAVILY_STATUS = {
+        "status": "success" if evidence else "empty",
+        "count": len(evidence),
+        "query": claim[:500],
+    }
+    return evidence
+
+
+def final_reasoning_with_gemini(content: str, claim: str, evidence: List[dict]) -> dict:
+    evidence_text = "\n".join(
+        f"KAYNAK {idx}: {item.get('title', '')} | {item.get('url', '')} | {item.get('content', '')[:700]}"
+        for idx, item in enumerate(evidence, 1)
+    ) or "KAYNAK YOK"
+    prompt = f"""
+Sen TruthLens AI'nin final evidence-based reasoning modülüsün. Türkçe yanıt ver.
+İçerik: {content[:2500]}
+Ana iddia: {claim or 'Yok'}
+Tavily kanıtları (yalnızca bunları kullan; kaynak uydurma):
+{evidence_text}
+Yalnızca JSON döndür:
+{{
+  "truthfulness": "Doğru / Büyük ölçüde doğru / Kısmen doğru / Yanıltıcı / Yanlış / Kanıt yetersiz",
+  "confidence": 0.0,
+  "reason": "Türkçe, kısa ve kanıta bağlı açıklama",
+  "supporting_urls": [],
+  "contradicting_urls": [],
+  "evidence": [{{"url": "", "relation": "supports / contradicts / context"}}],
+  "score": 0,
+  "manipulation": 0,
+  "clickbait": 0,
+  "emotion": "Nötr",
+  "polarization_risk": 0,
+  "echo_chamber": "Kısa sosyal risk notu",
+  "ai_rewrite": "Tarafsız yeniden yazım",
+  "social_risk_summary": "Kısa sosyal risk özeti",
+  "validity": "Geçerli / Güncelliğini yitirmiş / Belirsiz",
+  "time_validity": "Kısa zaman notu",
+  "context": "Ek bağlam",
+  "explanation": "Açıklama",
+  "score_breakdown": "Puan kırılımı"
+}}
+"""
+    try:
+        data = parse_json_object(call_llm([{"role": "user", "content": prompt}], temperature=0.1))
+        return data or {}
+    except Exception as exc:
+        print(f"[TruthLens] Final reasoning fallback: {exc}")
+        return {}
+
+
 def run_analysis(analyzed_content: str, source_url: Optional[str] = None) -> AnalysisResponse:
     key = analysis_cache_key(analyzed_content, source_url)
     if key in ANALYSIS_CACHE:
         return ANALYSIS_CACHE[key]
 
-    try:
-        analyzed_excerpt = analyzed_content[:350]
-        prompt = f"""
-Sen TruthLens AI adlı Türkçe bilgi doğrulama sistemisin.
-Sadece JSON döndür. Kısa, güvenli ve ihtiyatlı ol.
-
-İçerik:
-\"\"\"
-{analyzed_excerpt}
-\"\"\"
-
-Kaynak URL: {source_url or "Yok"}
-
-Kurallar:
-- Aşırı uzun açıklama yazma.
-- Kaynak uydurma. sources boş olabilir.
-- Sağladığın skorlar risk tahminidir, kesin hüküm değildir.
-
-JSON formatı:
-{{
-  "score": 0-100,
-  "manipulation": 0-100,
-  "clickbait": 0-100,
-  "result": "Doğru / Yanıltıcı / Yanlış / Kanıt yetersiz / Kısmen doğru / Büyük ölçüde doğru",
-  "explanation": "Kısa Türkçe açıklama.",
-  "score_breakdown": "Kısa puan kırılımı.",
-  "validity": "Geçerli / Güncelliğini yitirmiş / Belirsiz",
-  "emotion": "Nötr / Korku / Öfke / Ümit / Manipülatif / Endişe / Heyecan / Diğer",
-  "time_validity": "Kısa zaman/geçerlilik notu.",
-  "polarization_risk": 0-100,
-  "echo_chamber": "Kısa risk notu.",
-  "ai_rewrite": "Kısa tarafsız yeniden yazım.",
-  "social_risk_summary": "Kısa sosyal risk özeti.",
-  "toxicity": {{
-    "insult": 0-100,
-    "bullying": 0-100,
-    "hate_speech": 0-100,
-    "targeted_person_or_group": "Genel",
-    "risk_level": "Düşük / Orta / Yüksek",
-    "context_note": "Kısa bağlam notu."
-  }},
-  "claims": [],
-  "context": "Ek bağlam gerekmiyor.",
-  "sources": [],
-  "supporting_sources": [],
-  "contradicting_sources": []
-}}
-"""
-        final_raw = call_llm([{"role": "user", "content": prompt}], temperature=0.1)
-        try:
-            data = json.loads(final_raw)
-        except Exception:
-            raise HTTPException(status_code=502, detail="LLM JSON döndürmedi.")
-    except Exception as exc:
-        print(f"[TruthLens] LLM fallback triggered for analysis: {exc}")
-        fallback = AnalysisResponse(
-            score=50,
-            manipulation=25,
-            clickbait=20,
-            result="Kanıt yetersiz",
-            explanation="AI analizi şu anda beklemede; canlı model bağlantısı kurulamadı. Bu nedenle geçici, güvenli bir düşük-risk sonuç döndürüldü.",
-            score_breakdown="Model erişilemediği için geçici güvenli değerlendirme kullanıldı.",
-            validity="Belirsiz",
-            emotion="Nötr",
-            time_validity="Geçerlilik doğrulanamadı; model erişimi yok.",
-            polarization_risk=15,
-            echo_chamber="Yüksek doğrulama güveni yok; manuel inceleme önerilir.",
-            ai_rewrite="İçerik tarafsız şekilde incelenmek üzere bekletildi.",
-            social_risk_summary="Canlı LLM erişilemediği için otomatik değerlendirme geçici olarak askıya alındı.",
-            toxicity=ToxicityAnalysis(
-                insult=0,
-                bullying=0,
-                hate_speech=0,
-                targeted_person_or_group="Genel",
-                risk_level="Düşük",
-                context_note="Canlı model erişilemediği için güvenli mod devrede.",
-            ),
-            moderation=decide_moderation_action(ToxicityAnalysis(
-                insult=0,
-                bullying=0,
-                hate_speech=0,
-                targeted_person_or_group="Genel",
-                risk_level="Düşük",
-                context_note="Güvenli mod",
-            )),
-            claims=[],
-            context="Bu yanıt, canlı LLM erişilemediği için güvenli yedek modda üretildi.",
-            sources=[],
-            supporting_sources=[],
-            contradicting_sources=[],
-            image_text="",
-            image_toxicity=ToxicityAnalysis(),
-            image_moderation_note="Görsel analizi yapılamadı; model erişilemedi.",
-            source_analysis=SourceAnalysis(),
-        )
-        ANALYSIS_CACHE[key] = fallback
-        return fallback
-
-    data["validity"], data["time_validity"] = infer_time_validity_and_validity(
-        analyzed_content,
-        str(data.get("validity", "Belirsiz")).strip(),
-        str(data.get("time_validity", "Tarihsel geçerlilik bilgisi çıkarılamadı.")).strip(),
+    text_toxicity, toxicity_label, toxicity_confidence, model_available = custom_text_toxicity(analyzed_content)
+    text_toxicity, auxiliary_toxicity_models = analyze_auxiliary_toxicity(
+        analyzed_content, text_toxicity, toxicity_label, toxicity_confidence, model_available
     )
+    claim_data = extract_claim_with_gemini(analyzed_content)
+    has_claim = bool(claim_data.get("has_claim")) and bool(str(claim_data.get("claim", "")).strip())
+    claim = str(claim_data.get("claim", "") or "").strip()
+    claims = [str(item).strip() for item in claim_data.get("claims", []) if str(item).strip()]
+    if claim and claim not in claims:
+        claims.insert(0, claim)
 
-    raw_sources = clean_source_list(data.get("sources", []))
-    raw_supporting_sources = clean_source_list(data.get("supporting_sources", []))
-    raw_contradicting_sources = clean_source_list(data.get("contradicting_sources", []))
-    sources = raw_sources
-    supporting_sources = raw_supporting_sources
-    contradicting_sources = raw_contradicting_sources
+    # Gemini claim JSON'u boş/yanlış döndürürse kaynak zincirini sessizce boş bırakma.
+    # Metni iddia adayı olarak kullanırız; bu bir Gemini hükmü değil, açıkça fallback'tir.
+    claim_fallback_used = False
+    if not claim and analyzed_content.strip():
+        candidate = re.sub(r"https?://\S+", "", analyzed_content).strip()
+        factual_markers = ("dır", "dir", "dur", "dür", "oldu", "olacak", "arttı", "azaldı", "yüzde", "resmi", "açıklama", "tüm", "her")
+        if len(candidate) >= 25 and any(marker in stable_text(candidate) for marker in factual_markers):
+            claim = candidate[:500]
+            claims = [claim]
+            claim_fallback_used = True
+            claim_data["has_claim"] = True
+            claim_data["search_query"] = claim
 
-    toxicity_data = data.get("toxicity") or {}
-    toxicity = ToxicityAnalysis(
-        insult=safe_score(toxicity_data.get("insult")),
-        bullying=safe_score(toxicity_data.get("bullying")),
-        hate_speech=safe_score(toxicity_data.get("hate_speech")),
-        targeted_person_or_group=str(toxicity_data.get("targeted_person_or_group", "Genel")).strip() or "Genel",
-        risk_level=str(toxicity_data.get("risk_level", "Düşük")).strip() or "Düşük",
-        context_note=str(toxicity_data.get("context_note", "Bağlam değerlendirmesi yapılmadı.")).strip() or "Bağlam değerlendirmesi yapılmadı.",
-    )
+    has_claim = bool(claim)
+    evidence = evidence_sources_for_claim(
+        claim or str(claim_data.get("search_query", "") or ""),
+        source_url=source_url,
+    ) if has_claim else []
+    final_reasoning_status = "not_needed_no_claim"
+    if has_claim:
+        final_data = final_reasoning_with_gemini(analyzed_content, claim, evidence)
+        final_reasoning_status = "success" if final_data else "fallback"
+    else:
+        final_data = {
+        "truthfulness": "Kanıt yetersiz",
+        "confidence": 0.0,
+        "reason": (
+            "AI analizi beklemede; claim extraction veya canlı model bağlantısı kurulamadı."
+            if claim_data.get("error")
+            else "Metinde web üzerinden doğrulanabilir bir ana iddia çıkarılamadı."
+        ),
+        "score": 50,
+        "manipulation": 0,
+        "clickbait": 0,
+        "emotion": "Nötr",
+        "polarization_risk": 0,
+        "echo_chamber": "Doğrulanabilir iddia bulunmadı.",
+        "ai_rewrite": analyzed_content[:300],
+        "social_risk_summary": "İddia yok; içerik toksisite açısından ayrıca değerlendirildi.",
+        "validity": "Belirsiz",
+        "time_validity": "İddia bulunmadığı için zaman doğrulaması yapılmadı.",
+        "context": "İçerik iddia içermiyor veya iddia çıkarımı başarısız oldu.",
+        "explanation": "Kanıtlanabilir bir iddia bulunamadı.",
+        "score_breakdown": "İddia yok: 50/100 güvenli varsayılan skor.",
+    }
 
+    toxicity = text_toxicity
     moderation = decide_moderation_action(toxicity)
+    supporting_urls = {normalize_url(str(url)) for url in final_data.get("supporting_urls", []) if str(url).strip()}
+    contradicting_urls = {normalize_url(str(url)) for url in final_data.get("contradicting_urls", []) if str(url).strip()}
+    # Gemini relation listesi URL listelerinden daha zengin olabilir; ikisini birleştir.
+    for relation_item in final_data.get("evidence", []) if isinstance(final_data.get("evidence", []), list) else []:
+        if not isinstance(relation_item, dict):
+            continue
+        relation_url = normalize_url(str(relation_item.get("url", "")))
+        relation = stable_text(str(relation_item.get("relation", "")))
+        if relation_url and relation in {"supports", "support", "destekler", "destekliyor"}:
+            supporting_urls.add(relation_url)
+        elif relation_url and relation in {"contradicts", "contradict", "çelişir", "çelişkili"}:
+            contradicting_urls.add(relation_url)
+    sources = []
+    supporting_sources = []
+    contradicting_sources = []
+    for item in evidence:
+        source = Source(
+            title=item.get("title", "Kanıt kaynağı") or "Kanıt kaynağı",
+            url=item.get("url", ""),
+            relevance=item.get("content", "")[:220] or "Tavily arama sonucu",
+            reliability=50,
+            reliability_reason="Tavily üzerinden getirilen aday kanıt; nihai insan doğrulaması önerilir.",
+        )
+        sources.append(source)
+        normalized = normalize_url(source.url)
+        if normalized in supporting_urls:
+            supporting_sources.append(source)
+        if normalized in contradicting_urls:
+            contradicting_sources.append(source)
 
+    result = str(final_data.get("truthfulness", "Kanıt yetersiz")).strip() or "Kanıt yetersiz"
     analysis_result = AnalysisResponse(
-        score=safe_score(data.get("score")),
-        manipulation=safe_score(data.get("manipulation")),
-        clickbait=safe_score(data.get("clickbait")),
-        result=str(data.get("result", "")).strip(),
-        explanation=str(data.get("explanation", "")).strip(),
-        score_breakdown=str(data.get("score_breakdown", "")).strip(),
-        validity=str(data.get("validity", "Belirsiz")).strip(),
-        emotion=str(data.get("emotion", "Nötr")).strip(),
-        time_validity=str(data.get("time_validity", "Tarihsel geçerlilik bilgisi çıkarılamadı.")).strip(),
-        polarization_risk=safe_score(data.get("polarization_risk")),
-        echo_chamber=str(data.get("echo_chamber", "Tek yönlü içerik tüketim riski belirsiz.")).strip(),
-        ai_rewrite=str(data.get("ai_rewrite", "Bu paylaşım için daha tarafsız öneri üretilemedi.")).strip(),
-        social_risk_summary=str(data.get("social_risk_summary", "Sosyal etki analizi yapılamadı.")).strip(),
+        score=safe_score(final_data.get("score"), 50),
+        manipulation=safe_score(final_data.get("manipulation")),
+        clickbait=safe_score(final_data.get("clickbait")),
+        result=result,
+        explanation=str(final_data.get("reason", final_data.get("explanation", ""))).strip(),
+        score_breakdown=str(final_data.get("score_breakdown", "")).strip(),
+        validity=str(final_data.get("validity", "Belirsiz")).strip(),
+        emotion=str(final_data.get("emotion", "Nötr")).strip(),
+        time_validity=str(final_data.get("time_validity", "")).strip(),
+        polarization_risk=safe_score(final_data.get("polarization_risk")),
+        echo_chamber=str(final_data.get("echo_chamber", "")).strip(),
+        ai_rewrite=str(final_data.get("ai_rewrite", analyzed_content[:300])).strip(),
+        social_risk_summary=str(final_data.get("social_risk_summary", "")).strip(),
         toxicity=toxicity,
+        toxicity_models=auxiliary_toxicity_models,
         moderation=moderation,
-        claims=[str(c).strip() for c in data.get("claims", []) if str(c).strip()],
-        context=str(data.get("context", "Ek bağlam gerekmiyor.")).strip(),
+        verification=VerificationBadge(),
+        claims=claims,
+        context=str(final_data.get("context", "")).strip(),
         sources=sources,
         supporting_sources=supporting_sources,
         contradicting_sources=contradicting_sources,
+        toxicity_label=toxicity_label,
+        toxicity_confidence=toxicity_confidence,
+        toxicity_engine="model" if model_available else "fallback",
+        claim=claim,
+        truthfulness=result,
+        truthfulness_confidence=safe_score(float(final_data.get("confidence", 0.0)) * 100) / 100,
+        evidence=[{"title": item.get("title", ""), "url": item.get("url", ""), "relation": "supports" if normalize_url(item.get("url", "")) in supporting_urls else "contradicts" if normalize_url(item.get("url", "")) in contradicting_urls else "context"} for item in evidence],
+        pipeline_status={
+            "toxicity_model": "ready" if model_available else "fallback",
+            "gemini_claim_extraction": "fallback_candidate" if claim_fallback_used else "success" if claim_data.get("claim") else "fallback_or_no_claim",
+            "tavily": dict(LAST_TAVILY_STATUS),
+            "gemini_final_reasoning": final_reasoning_status,
+            "claim_detected": bool(claim),
+            "message": (
+                "Gemini claim çıkarımı boş döndü; metin iddia adayı olarak Tavily'e gönderildi."
+                if claim_fallback_used else
+                "Gemini claim çıkarımı ve final reasoning tamamlandı."
+                if final_reasoning_status == "success" else
+                "Doğrulanabilir claim bulunamadı veya Gemini fallback moduna geçti."
+            ),
+        },
     )
-
+    analysis_result.verification = compute_truthlens_verification(analysis_result, bool(source_url))
     ANALYSIS_CACHE[key] = analysis_result
     return analysis_result
 
@@ -2268,16 +2723,32 @@ def root():
         "status": "online",
         "service": "TruthLens AI",
         "version": "3.1.0",
-        "engine": "NaraRouter + Tavily",
+        "engine": "Custom Turkish BERT+LoRA + Gemini reasoning + Tavily evidence",
     }
 
 @app.get("/health")
 def health():
     return {
         "status": "healthy",
-        "nararouter_configured": bool(NARAROUTER_API_KEY),
+        "google_gemini_configured": bool(GOOGLE_API_KEY),
+        "gemini_status": dict(LAST_GEMINI_STATUS),
         "tavily_configured": bool(TAVILY_API_KEY),
-        "model": NARAROUTER_MODEL,
+        "model": GEMINI_MODEL,
+        "custom_toxicity_model": {
+            "available": TOXICITY_SERVICE.available,
+            "base_model": TOXICITY_BASE_MODEL,
+            "model_id": TOXICITY_MODEL_ID,
+            "source": "huggingface_hub",
+            "hf_token_configured": bool(HF_TOKEN),
+            "device": TOXICITY_SERVICE.device,
+            "error": TOXICITY_SERVICE.error,
+            "import_error": MODEL_IMPORT_ERROR,
+        },
+        "auxiliary_models": {
+            "insult": {"available": INSULT_SERVICE.available, "model_id": INSULT_MODEL_ID, "labels": INSULT_SERVICE.id2label, "error": INSULT_SERVICE.error, "import_error": MODEL_IMPORT_ERROR},
+            "bullying": {"available": BULLYING_SERVICE.available, "model_id": BULLYING_MODEL_ID, "labels": BULLYING_SERVICE.id2label, "error": BULLYING_SERVICE.error, "import_error": MODEL_IMPORT_ERROR},
+            "hate_speech": {"available": HATE_SERVICE.available, "model_id": HATE_MODEL_ID, "labels": HATE_SERVICE.id2label, "error": HATE_SERVICE.error, "import_error": MODEL_IMPORT_ERROR},
+        },
     }
 
 @app.post("/register")
@@ -2523,7 +2994,7 @@ def analyze_source_chain(
     5. Her aday için ayrıca "match_probability" (incelenen içerikle konu/iddia eşleşme yüzdesi) belirle.
        - İddia ile doğrudan aynı olayı, duyuruyu veya metni ele alan kaynaklar yüksek skor almalı.
        - Sadece aynı genel konuya değinen ama farklı olayları anlatan sonuçlar düşük skor almalı.
-       - Alakasız sonuçlara %20'nin altında skor ver.
+       - Alakasız sonuçlara %25'in altında skor ver.
        - Bu değer BİRİNCİL KAYNAK olma ihtimali değildir; yalnızca içerikle eşleşme değeridir.
     6. Birincil kaynak olarak seçilen adayın detaylarını belirle:
        - `likely_original_source`: BİRİNCİL PAYLAŞIMI YAPAN HESABIN/KİŞİNİN GÖRÜNÜR ADI (örn. 'Millî Eğitim Bakanlığı', 'Ahmet Yılmaz'). Buraya yalnızca platform adı (X, Facebook, Instagram, NSosyal vb.) YAZMA; haber başlığını da kaynak adı olarak kullanma.
@@ -2755,7 +3226,7 @@ def analyze_source_chain(
             )
         fallback_candidates = [
             item for item in source_chain_items
-            if item.url and item.match_probability >= 10
+            if item.url and item.match_probability >= 25
         ]
         fallback_candidates.sort(
             key=lambda item: item.match_probability,
@@ -2921,7 +3392,7 @@ def history(request: Request):
 def analyze(request_body: AnalysisRequest, request: Request):
     t_start = time.time()
     
-    original = request_body.content.strip()
+    original = (request_body.content or request_body.text or "").strip()
     if not original:
         raise HTTPException(status_code=400, detail="İçerik boş olamaz.")
 
@@ -2971,19 +3442,10 @@ def analyze(request_body: AnalysisRequest, request: Request):
                     source_url or url,
                 )
                 
-        # Submit analyze_source_chain if url exists
+        # Yeni ana pipeline claim extraction -> Tavily -> final reasoning adımlarını
+        # run_analysis içinde çalıştırır. Eski kaynak-zinciri LLM çağrıları burada
+        # tekrar edilmez; böylece URL analizinde Gemini çağrısı iki ile sınırlıdır.
         future_source = None
-        if url:
-            metadata = (post.get("metadata") or {}) if "post" in locals() else {}
-            future_source = executor.submit(
-                analyze_source_chain,
-                title=str((metadata.get("title") or post.get("title") or "") if "post" in locals() else ""),
-                description=str(metadata.get("description", "") or ""),
-                body=analyzed_content,
-                current_url=source_url or url,
-                current_date=str(metadata.get("published_time", "") or ""),
-                current_site=str(metadata.get("site_name", "") or ""),
-            )
             
         # Get run_analysis result
         try:
@@ -3040,6 +3502,8 @@ def analyze(request_body: AnalysisRequest, request: Request):
     combined_toxicity = merge_toxicity_signals(result.toxicity, image_toxicity)
     result = result.model_copy(update={
         "toxicity": combined_toxicity,
+        "toxicity_label": "toxic" if max(combined_toxicity.insult, combined_toxicity.bullying, combined_toxicity.hate_speech) > 0 else result.toxicity_label,
+        "toxicity_confidence": max(result.toxicity_confidence, 0.0),
         "moderation": decide_moderation_action(combined_toxicity),
         "image_text": image_text,
         "image_toxicity": image_toxicity,
@@ -3101,6 +3565,27 @@ def analyze(request_body: AnalysisRequest, request: Request):
                         for c in candidate_sources
                     ]
                 })
+
+    # Yeni pipeline kaynakları, mevcut source_analysis kartı için deterministik
+    # bir kaynak zinciri görünümüne çevrilir; ek LLM çağrısı yapılmaz.
+    if url and not source_analysis.source_chain and result.sources:
+        source_analysis = SourceAnalysis(
+            source_status="candidate",
+            source_probability=0,
+            likely_original_source=result.sources[0].title,
+            likely_original_url=result.sources[0].url,
+            current_source_date="",
+            source_chain=[
+                SourceChainItem(
+                    source=item.title,
+                    url=item.url,
+                    platform=get_domain(item.url),
+                    match_probability=100 if item in result.supporting_sources else 50,
+                )
+                for item in result.sources
+            ],
+            reasoning="Kaynak zinciri, yeni claim → Tavily → Gemini kanıt akışındaki gerçek URL’lerden oluşturuldu.",
+        )
 
     content_hash = analysis_cache_key(analyzed_content, source_url)
     result = result.model_copy(update={
