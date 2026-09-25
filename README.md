@@ -301,7 +301,19 @@ raw_three_before.json
 
 ---
 
-## 7. macOS kurulumu ve çalıştırma
+## Üretime dağıtım: Vercel + Render
+
+Bu projede Next.js arayüzünü Vercel'e, FastAPI backend'ini ise sürekli çalışan ayrı bir servise dağıtın. Backend başlangıçta dört PyTorch/Transformers modelini yüklediğinden Vercel'in serverless function limitlerine uygun değildir. `render.yaml`, Render'da backend'i tek worker ile başlatır; SQLite veritabanı ve Hugging Face model cache'i kalıcı diskte tutulur.
+
+1. GitHub deposunu Vercel'e import edin. **Root Directory** olarak `frontend` seçin; Next.js otomatik algılanır.
+2. Vercel projesinin **Settings → Environment Variables** bölümüne `NEXT_PUBLIC_API_BASE_URL` ekleyin. Değer, Render API servis URL'si olmalı; örneğin `https://truthlens-api.onrender.com`. Sonra Vercel'de yeniden deploy edin.
+3. Render'da **New → Blueprint** ile aynı GitHub deposunu seçin. Render kökteki `render.yaml` dosyasından `truthlens-api` servisini oluşturur. İstendiğinde `GOOGLE_API_KEY` ve `TAVILY_API_KEY` değerlerini Render ortam değişkenlerine girin. Public Hugging Face modelleri için `HF_TOKEN` gerekmez; rate limit/private model durumunda Render backend ortam değişkeni olarak ayrıca ekleyin.
+4. Vercel'in verdiği tam frontend origin'ini Render'daki `ALLOWED_ORIGINS` değişkenine yazın; örneğin `https://truthlens-ai.vercel.app` (sonunda `/` olmadan). Preview deployment kullanacaksanız onu da virgülle ayırarak ekleyin. Render servisini yeniden deploy edin.
+5. `https://<render-servis-adı>.onrender.com/health` adresini açın. API sağlık yanıtı dönmeli; ardından Vercel frontend'inden analiz deneyin.
+
+Render Blueprint, model yükleme ve OCR için yeterli RAM sağlayan ücretli bir instance ile 20 GB kalıcı disk tanımlar. İlk açılışta modeller Hugging Face'ten indirilir ve bu nedenle servis hazır hale gelmesi zaman alabilir. SQLite ve Render kalıcı diski tek instance içindir; yatay ölçekleme veya birden fazla backend instance'ı açmayın. API anahtarlarını Vercel'e değil, Render backend ortam değişkenlerine koyun.
+
+### macOS kurulumu ve çalıştırma
 
 Aşağıdaki adımlar macOS içindir. Terminal uygulamasını açın. Proje klasörünüzün adını farklı verdiyseniz `truthlens-ai` yerine kendi klasör adınızı yazın.
 

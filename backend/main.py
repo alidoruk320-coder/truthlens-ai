@@ -70,7 +70,7 @@ BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
 BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD")
 BLUESKY_FEED_LIMIT = int(os.getenv("BLUESKY_FEED_LIMIT", "5"))
 BLUESKY_FEED_MAX_LIMIT = int(os.getenv("BLUESKY_FEED_MAX_LIMIT", "20"))
-DB_PATH = os.path.join(os.path.dirname(__file__), "truthlens.db")
+DB_PATH = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "truthlens.db"))
 
 app = FastAPI(
     title="TruthLens AI API",
