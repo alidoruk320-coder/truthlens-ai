@@ -8,7 +8,7 @@ import threading
 import concurrent.futures
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 from io import BytesIO
@@ -100,6 +100,7 @@ class AnalysisRequest(BaseModel):
     # Frontend mevcut sözleşmede content kullanır; teknik örneklerdeki text de kabul edilir.
     content: Optional[str] = Field(default=None, min_length=1, max_length=10000)
     text: Optional[str] = Field(default=None, min_length=1, max_length=10000)
+    language: Literal["tr", "en"] = "tr"
 
 class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -545,10 +546,10 @@ def analyze_auxiliary_toxicity(text: str, general_toxicity: ToxicityAnalysis, ge
 # Değerlendirme scripti (evaluate_moderation.py) bu fonksiyonu doğrudan
 # import ederek etiketli test seti üzerinde precision/recall/F1 ölçer.
 
-RISK_LEVEL_SCORE = {"Düşük": 0, "Orta": 45, "Yüksek": 80}
+RISK_LEVEL_SCORE = {"Düşük": 0, "Orta": 45, "Yüksek": 80, "Low": 0, "Medium": 45, "High": 80}
 
 
-def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
+def decide_moderation_action(toxicity: ToxicityAnalysis, language: str = "tr") -> ModerationDecision:
     """
     Yüksek riskli hedefli saldırılar ve tehditler, "potansiyel saldırgan" seviyesine göre
     boşluk bırakmadan kaldırma önerisine alınır.
@@ -560,7 +561,8 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
     - Allow (izin_ver): anlamlı toksisite sinyali yok.
     """
     risk_level_component = RISK_LEVEL_SCORE.get(toxicity.risk_level, 0)
-    target_is_generic = toxicity.targeted_person_or_group in ["Genel", "", None]
+    english = language == "en"
+    target_is_generic = toxicity.targeted_person_or_group in ["Genel", "General", "", None]
     target_is_specific = not target_is_generic
 
     aggregate_risk = max(
@@ -575,7 +577,7 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
             toxicity.hate_speech >= 60 or
             toxicity.bullying >= 70 or
             toxicity.insult >= 70 or
-            (toxicity.risk_level == "Yüksek" and (toxicity.hate_speech >= 45 or toxicity.bullying >= 55))
+            (toxicity.risk_level in {"Yüksek", "High"} and (toxicity.hate_speech >= 45 or toxicity.bullying >= 55))
         )
     )
 
@@ -588,8 +590,11 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
     ):
         return ModerationDecision(
             action="kaldirma_oner",
-            action_label="Kaldırma önerisi - insan onayı gerekli",
+            action_label="Removal recommended - human approval required" if english else "Kaldırma önerisi - insan onayı gerekli",
             reason=(
+                f"Severe hate speech ({toxicity.hate_speech}/100), targeted attack, or high-risk dehumanization detected. "
+                f"Target: {toxicity.targeted_person_or_group}. Automatic removal is disabled because this action is irreversible."
+                if english else
                 f"Ağır nefret söylemi ({toxicity.hate_speech}/100), hedefli saldırı "
                 f"veya yüksek-risk dehumanizasyon tespit edildi. "
                 f"Hedefi: {toxicity.targeted_person_or_group}. "
@@ -605,12 +610,15 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
         (toxicity.hate_speech >= 35 and toxicity.hate_speech < 65) or
         (toxicity.bullying >= 45 and toxicity.bullying < 70) or
         (toxicity.insult >= 55 and target_is_specific) or
-        (toxicity.risk_level == "Yüksek" and not target_is_generic)
+        (toxicity.risk_level in {"Yüksek", "High"} and not target_is_generic)
     ):
         return ModerationDecision(
             action="gizle_ve_incele",
-            action_label="İçerik gizlendi, incelemeye alındı",
+            action_label="Content hidden and sent for review" if english else "İçerik gizlendi, incelemeye alındı",
             reason=(
+                f"Medium-to-high risk signals: insult {toxicity.insult}/100, bullying {toxicity.bullying}/100, hate speech {toxicity.hate_speech}/100. "
+                f"Target: {toxicity.targeted_person_or_group}. Moderator review is required for a final decision."
+                if english else
                 f"Orta-yüksek risk sinyalleri: hakaret {toxicity.insult}/100, "
                 f"zorbalık {toxicity.bullying}/100, nefret söylemi {toxicity.hate_speech}/100. "
                 f"Hedef: {toxicity.targeted_person_or_group}. "
@@ -626,12 +634,15 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
         (toxicity.hate_speech >= 12 and toxicity.hate_speech < 35) or
         (toxicity.bullying >= 18 and toxicity.bullying < 45) or
         (toxicity.insult >= 22 and toxicity.insult < 55) or
-        toxicity.risk_level == "Orta"
+        toxicity.risk_level in {"Orta", "Medium"}
     ):
         return ModerationDecision(
             action="etiketle",
-            action_label="İçerik uyarı etiketiyle yayında kalıyor",
+            action_label="Content remains available with a warning label" if english else "İçerik uyarı etiketiyle yayında kalıyor",
             reason=(
+                f"Low-to-medium risk signals: insult {toxicity.insult}, bullying {toxicity.bullying}, hate speech {toxicity.hate_speech}. "
+                f"The content stays available with a context label. Risk level: {toxicity.risk_level}."
+                if english else
                 f"Düşük-orta şiddette risk sinyali: hakaret {toxicity.insult}, "
                 f"zorbalık {toxicity.bullying}, nefret söylemi {toxicity.hate_speech}. "
                 f"İçerik kaldırılmadan bağlam etiketi eklenir. "
@@ -644,104 +655,115 @@ def decide_moderation_action(toxicity: ToxicityAnalysis) -> ModerationDecision:
 
     return ModerationDecision(
         action="izin_ver",
-        action_label="İçeriğe izin verildi",
-        reason="Anlamlı bir toksisite sinyali tespit edilmedi.",
+        action_label="Content allowed" if english else "İçeriğe izin verildi",
+        reason="No significant toxicity signals were detected." if english else "Anlamlı bir toksisite sinyali tespit edilmedi.",
         requires_human_review=False,
         appeal_eligible=False,
         aggregate_risk=aggregate_risk,
     )
 
 
-def merge_toxicity_signals(text_toxicity: ToxicityAnalysis, image_toxicity: ToxicityAnalysis) -> ToxicityAnalysis:
+def merge_toxicity_signals(text_toxicity: ToxicityAnalysis, image_toxicity: ToxicityAnalysis, language: str = "tr") -> ToxicityAnalysis:
     """Metin ve görsel toksisite sinyallerini ihtiyatlı biçimde birleştirir."""
+    risk_rank = {"Düşük": 0, "Low": 0, "Orta": 1, "Medium": 1, "Yüksek": 2, "High": 2}
+    highest_risk = max((text_toxicity.risk_level, image_toxicity.risk_level), key=lambda level: risk_rank.get(level, 0))
+    if language == "en":
+        highest_risk = {"Düşük": "Low", "Orta": "Medium", "Yüksek": "High"}.get(highest_risk, highest_risk)
     return ToxicityAnalysis(
         insult=max(text_toxicity.insult, image_toxicity.insult),
         bullying=max(text_toxicity.bullying, image_toxicity.bullying),
         hate_speech=max(text_toxicity.hate_speech, image_toxicity.hate_speech),
         targeted_person_or_group=(
             image_toxicity.targeted_person_or_group
-            if image_toxicity.targeted_person_or_group not in {"", "Genel"}
+            if image_toxicity.targeted_person_or_group not in {"", "Genel", "General"}
             else text_toxicity.targeted_person_or_group
         ),
-        risk_level=(
-            "Yüksek"
-            if "Yüksek" in {text_toxicity.risk_level, image_toxicity.risk_level}
-            else "Orta"
-            if "Orta" in {text_toxicity.risk_level, image_toxicity.risk_level}
-            else "Düşük"
-        ),
+        risk_level=highest_risk,
         context_note=(
-            f"Metin ve görsel birlikte değerlendirildi. "
-            f"Görsel sinyali: {image_toxicity.context_note}"
+            (
+                f"Text and image signals combined: insult {max(text_toxicity.insult, image_toxicity.insult)}/100, "
+                f"bullying {max(text_toxicity.bullying, image_toxicity.bullying)}/100, "
+                f"hate speech {max(text_toxicity.hate_speech, image_toxicity.hate_speech)}/100."
+                if language == "en"
+                else f"Metin ve görsel birlikte değerlendirildi. Görsel sinyali: {image_toxicity.context_note}"
+            )
         ),
     )
 
 
-def compute_truthlens_verification(result: AnalysisResponse, has_source_url: bool = False) -> VerificationBadge:
+def compute_truthlens_verification(
+    result: AnalysisResponse,
+    has_source_url: bool = False,
+    language: str = "tr",
+) -> VerificationBadge:
     """TruthLens doğrulama rozetini mevcut analiz kontrollerine göre üretir."""
     reasons: List[str] = []
+    english = language == "en"
 
-    correct_results = {"doğru", "büyük ölçüde doğru"}
+    correct_results = {"doğru", "büyük ölçüde doğru", "true", "mostly true"}
     if stable_text(result.result) not in correct_results:
-        reasons.append("Doğruluk sonucu rozet için yeterince güçlü değil.")
+        reasons.append("The truthfulness verdict is not strong enough for the badge." if english else "Doğruluk sonucu rozet için yeterince güçlü değil.")
 
     if result.score < 80:
-        reasons.append(f"Gerçeklik skoru {result.score}/100; rozet eşiği 80.")
+        reasons.append(f"Truth score is {result.score}/100; the badge threshold is 80." if english else f"Gerçeklik skoru {result.score}/100; rozet eşiği 80.")
 
     if result.manipulation > 20:
-        reasons.append(f"Manipülasyon riski {result.manipulation}/100; eşik 20.")
+        reasons.append(f"Manipulation risk is {result.manipulation}/100; the threshold is 20." if english else f"Manipülasyon riski {result.manipulation}/100; eşik 20.")
 
     if result.clickbait > 20:
-        reasons.append(f"Clickbait riski {result.clickbait}/100; eşik 20.")
+        reasons.append(f"Clickbait risk is {result.clickbait}/100; the threshold is 20." if english else f"Clickbait riski {result.clickbait}/100; eşik 20.")
 
     if result.polarization_risk > 30:
-        reasons.append(f"Kutuplaşma riski {result.polarization_risk}/100; eşik 30.")
+        reasons.append(f"Polarization risk is {result.polarization_risk}/100; the threshold is 30." if english else f"Kutuplaşma riski {result.polarization_risk}/100; eşik 30.")
 
-    if stable_text(result.validity) != "geçerli":
-        reasons.append("İçeriğin geçerlilik/güncellik durumu rozet için uygun değil.")
+    if stable_text(result.validity) not in {"geçerli", "valid"}:
+        reasons.append("The content's validity or freshness is not suitable for the badge." if english else "İçeriğin geçerlilik/güncellik durumu rozet için uygun değil.")
 
     toxicity = result.toxicity
-    if stable_text(toxicity.risk_level) != "düşük":
-        reasons.append("Toksisite risk seviyesi düşük değil.")
+    if stable_text(toxicity.risk_level) not in {"düşük", "low"}:
+        reasons.append("The toxicity risk level is not low." if english else "Toksisite risk seviyesi düşük değil.")
     if max(toxicity.insult, toxicity.bullying, toxicity.hate_speech) > 20:
-        reasons.append("Toksisite sinyallerinden en az biri 20/100 üzerinde.")
+        reasons.append("At least one toxicity signal is above 20/100." if english else "Toksisite sinyallerinden en az biri 20/100 üzerinde.")
 
     if result.moderation.action != "izin_ver":
-        reasons.append("Moderasyon kararı 'izin ver' seviyesinde değil.")
+        reasons.append("The moderation decision is not 'allow'." if english else "Moderasyon kararı 'izin ver' seviyesinde değil.")
 
     if result.contradicting_sources:
-        reasons.append("Çelişen kaynaklar bulunduğu için rozet verilmedi.")
+        reasons.append("The badge was withheld because contradicting sources were found." if english else "Çelişen kaynaklar bulunduğu için rozet verilmedi.")
 
     if has_source_url:
         source = result.source_analysis
         if not source or source.source_probability < 70:
-            reasons.append("Kaynak zincirinde yeterince güçlü bir birincil kaynak doğrulaması yok.")
+            reasons.append("The source chain lacks strong enough verification of a primary source." if english else "Kaynak zincirinde yeterince güçlü bir birincil kaynak doğrulaması yok.")
         if source and stable_text(source.source_status) == "uncertain":
-            reasons.append("Birincil kaynak durumu belirsiz.")
+            reasons.append("The primary source status is uncertain." if english else "Birincil kaynak durumu belirsiz.")
 
     if reasons:
         return VerificationBadge(
             verified=False,
-            label="TruthLens doğrulaması tamamlanmadı",
-            short_label="Doğrulanmadı",
+            label="TruthLens verification is incomplete" if english else "TruthLens doğrulaması tamamlanmadı",
+            short_label="Unverified" if english else "Doğrulanmadı",
             reasons=reasons,
         )
 
     return VerificationBadge(
         verified=True,
-        label="TruthLens kanıt kapsamı tamamlandı — kesin doğruluk garantisi değildir",
-        short_label="Kanıt kapsamı tamamlandı",
+        label="TruthLens evidence review complete — this is not a guarantee of truth" if english else "TruthLens kanıt kapsamı tamamlandı — kesin doğruluk garantisi değildir",
+        short_label="Evidence review complete" if english else "Kanıt kapsamı tamamlandı",
         reasons=[
-            f"Doğruluk: {result.result} · gerçeklik skoru {result.score}/100.",
-            f"Güncellik/geçerlilik: {result.validity} · zaman değerlendirmesi: {result.time_validity}.",
+            f"Truthfulness: {result.result} · truth score {result.score}/100." if english else f"Doğruluk: {result.result} · gerçeklik skoru {result.score}/100.",
+            f"Freshness/validity: {result.validity} · time assessment: {result.time_validity}." if english else f"Güncellik/geçerlilik: {result.validity} · zaman değerlendirmesi: {result.time_validity}.",
             (
+                f"Toxicity context: insult {toxicity.insult}%, bullying {toxicity.bullying}%, "
+                f"hate speech {toxicity.hate_speech}% · risk {toxicity.risk_level}."
+                if english else
                 f"Toksik bağlam: hakaret %{toxicity.insult}, zorbalık %{toxicity.bullying}, "
                 f"nefret dili %{toxicity.hate_speech} · risk {toxicity.risk_level}."
             ),
-            f"Toksisite hedefi/bağlamı: {toxicity.targeted_person_or_group}.",
-            f"Manipülasyon %{result.manipulation} · clickbait %{result.clickbait} · kutuplaşma %{result.polarization_risk}.",
-            f"Moderasyon: {result.moderation.action_label} · toplam risk %{result.moderation.aggregate_risk}.",
-            "Tüm TruthLens doğrulama koşulları sağlandı.",
+            f"Toxicity target/context: {toxicity.targeted_person_or_group}." if english else f"Toksisite hedefi/bağlamı: {toxicity.targeted_person_or_group}.",
+            f"Manipulation {result.manipulation}% · clickbait {result.clickbait}% · polarization {result.polarization_risk}%." if english else f"Manipülasyon %{result.manipulation} · clickbait %{result.clickbait} · kutuplaşma %{result.polarization_risk}.",
+            f"Moderation: {result.moderation.action_label} · aggregate risk {result.moderation.aggregate_risk}%." if english else f"Moderasyon: {result.moderation.action_label} · toplam risk %{result.moderation.aggregate_risk}.",
+            "All TruthLens verification requirements were met." if english else "Tüm TruthLens doğrulama koşulları sağlandı.",
         ],
     )
 
@@ -831,11 +853,11 @@ def normalize_bluesky_post(feed_item) -> dict:
         }
 
 
-def social_analysis_cache_key(uri: str, cid: str = "", content: str = "") -> str:
+def social_analysis_cache_key(uri: str, cid: str = "", content: str = "", language: str = "tr") -> str:
     normalized_uri = normalize_url(uri)
     normalized_cid = str(cid or "").strip().lower()
     normalized_content = stable_text(content)
-    raw = f"truthlens:social:v1|{normalized_uri}|{normalized_cid}|{normalized_content}"
+    raw = f"truthlens:social:v2|{language}|{normalized_uri}|{normalized_cid}|{normalized_content}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -857,15 +879,17 @@ def is_rate_limit_error(exc: Exception) -> bool:
     return "429" in message or "rate limit" in message or "too many requests" in message
 
 
-def build_social_analysis_fallback(message: str = "AI analizi şu anda beklemede.") -> dict:
+def build_social_analysis_fallback(message: str = "AI analizi şu anda beklemede.", language: str = "tr") -> dict:
+    if language == "en" and message == "AI analizi şu anda beklemede.":
+        message = "AI analysis is pending."
     return {
         "summary": message,
         "misinformation_risk": 0,
         "polarization": 0,
         "hate_speech": 0,
         "spam_risk": 0,
-        "sentiment": "Belirsiz",
-        "reasoning": "Hafif analiz şu anda üretilemedi. Gönderi gösterilmeye devam ediyor.",
+        "sentiment": "Unclear" if language == "en" else "Belirsiz",
+        "reasoning": "The mini analysis could not be generated. The post remains visible." if language == "en" else "Hafif analiz şu anda üretilemedi. Gönderi gösterilmeye devam ediyor.",
         "status": "pending",
     }
 
@@ -925,15 +949,16 @@ def estimate_social_signals(content: str) -> dict:
     }
 
 
-def analyze_social_post(content: str, source_url: str = "", cid: str = "") -> dict:
-    cache_key = social_analysis_cache_key(source_url, cid, content)
+def analyze_social_post(content: str, source_url: str = "", cid: str = "", language: str = "tr") -> dict:
+    cache_key = social_analysis_cache_key(source_url, cid, content, language)
     cached = ANALYSIS_CACHE.get(cache_key)
     if isinstance(cached, dict):
         return cached
 
+    output_language = "English" if language == "en" else "Turkish"
     prompt = f"""
-Aşağıdaki Bluesky gönderisi için yalnızca JSON döndür.
-Çok kısa düşün. Web araştırması yapma.
+Return JSON only for the following Bluesky post.
+Keep it concise. Do not research the web. Write every text value in {output_language}.
 
 Gönderi:
 \"\"\"
@@ -942,13 +967,13 @@ Gönderi:
 
 Çıktı şeması:
 {{
-  "summary": "1-2 cümlelik Türkçe mini özet",
+    "summary": "a 1-2 sentence mini summary in {output_language}",
   "misinformation_risk": 0-100,
   "polarization": 0-100,
   "hate_speech": 0-100,
   "spam_risk": 0-100,
-  "sentiment": "Nötr / Öfke / Endişe / Ümit / Korku / Diğer",
-  "reasoning": "Kısa Türkçe gerekçe"
+    "sentiment": "a short sentiment label in {output_language}",
+    "reasoning": "a short rationale in {output_language}"
 }}
 """
 
@@ -956,13 +981,13 @@ Gönderi:
         raw = call_llm([{"role": "user", "content": prompt}], temperature=0.1)
         data = json.loads(raw)
         result = {
-            "summary": str(data.get("summary", "TruthLens mini analizi üretildi.")).strip(),
+            "summary": str(data.get("summary", "TruthLens mini analysis generated." if language == "en" else "TruthLens mini analizi üretildi.")).strip(),
             "misinformation_risk": safe_score(data.get("misinformation_risk")),
             "polarization": safe_score(data.get("polarization")),
             "hate_speech": safe_score(data.get("hate_speech")),
             "spam_risk": safe_score(data.get("spam_risk")),
-            "sentiment": str(data.get("sentiment", "Belirsiz")).strip() or "Belirsiz",
-            "reasoning": str(data.get("reasoning", "Kısa gerekçe sağlanamadı.")).strip() or "Kısa gerekçe sağlanamadı.",
+            "sentiment": str(data.get("sentiment", "Unclear" if language == "en" else "Belirsiz")).strip() or ("Unclear" if language == "en" else "Belirsiz"),
+            "reasoning": str(data.get("reasoning", "A short rationale is unavailable." if language == "en" else "Kısa gerekçe sağlanamadı.")).strip() or ("A short rationale is unavailable." if language == "en" else "Kısa gerekçe sağlanamadı."),
             "status": "ready",
         }
         ANALYSIS_CACHE[cache_key] = result
@@ -973,23 +998,27 @@ Gönderi:
             retry_after = parse_retry_after(exc)
             if retry_after:
                 time.sleep(min(retry_after, 2))
-        fallback = build_social_analysis_fallback()
+        fallback = build_social_analysis_fallback(language=language)
         fallback["status"] = "rate_limited" if is_rate_limit_error(exc) else "error"
-        fallback["reasoning"] = "Mini analiz isteği şu anda tamamlanamadı; gönderi görünür durumda."
+        fallback["reasoning"] = "The mini analysis could not be completed; the post remains visible." if language == "en" else "Mini analiz isteği şu anda tamamlanamadı; gönderi görünür durumda."
         ANALYSIS_CACHE[cache_key] = fallback
         return fallback
 
 
-def attach_social_analysis(post: dict) -> dict:
+def attach_social_analysis(post: dict, language: str = "tr") -> dict:
     content = post.get("content", "")
     source_url = post.get("source_url", "")
     cid = post.get("cid", "")
-    cache_key = social_analysis_cache_key(source_url, cid, content)
+    cache_key = social_analysis_cache_key(source_url, cid, content, language)
     cached = ANALYSIS_CACHE.get(cache_key)
     if isinstance(cached, dict):
         analysis = cached
     else:
         analysis = estimate_social_signals(content)
+        if language == "en":
+            analysis["sentiment"] = {"Öfke": "Anger", "Endişe": "Concern", "Heyecan": "Excitement", "Nötr": "Neutral", "Belirsiz": "Unclear"}.get(analysis.get("sentiment"), analysis.get("sentiment"))
+            analysis["summary"] = "🤖 TruthLens mini analysis is pending..."
+            analysis["reasoning"] = "This is a preliminary language-signal estimate; it will be updated when the full mini analysis is complete."
         analysis["cache_key"] = cache_key
         analysis["analysis_status"] = "pending"
     return {
@@ -1016,10 +1045,10 @@ def attach_social_analysis(post: dict) -> dict:
     }
 
 
-def warm_social_analysis(posts: List[dict], limit: int = 3) -> None:
+def warm_social_analysis(posts: List[dict], limit: int = 3, language: str = "tr") -> None:
     for post in posts[:limit]:
         try:
-            analyze_social_post(post.get("content", ""), post.get("source_url", ""), post.get("cid", ""))
+            analyze_social_post(post.get("content", ""), post.get("source_url", ""), post.get("cid", ""), language)
         except Exception:
             continue
 
@@ -1039,7 +1068,7 @@ def warm_image_analysis(posts: List[dict], limit: int = 2) -> None:
             continue
 
 
-def fetch_bluesky_feed(limit: int = BLUESKY_FEED_LIMIT) -> dict:
+def fetch_bluesky_feed(limit: int = BLUESKY_FEED_LIMIT, language: str = "tr") -> dict:
     try:
         limit = max(1, min(limit, BLUESKY_FEED_MAX_LIMIT))
         client = get_bluesky_client()
@@ -1079,12 +1108,12 @@ def fetch_bluesky_feed(limit: int = BLUESKY_FEED_LIMIT) -> dict:
                     "context_note": "Mini analiz henüz tamamlanmadı.",
                 },
             }
-            post_payload = attach_social_analysis(post_payload)
+            post_payload = attach_social_analysis(post_payload, language)
             posts.append(post_payload)
 
         uncached_posts = [post for post in posts if post.get("analysis_status") == "pending"]
         if uncached_posts:
-            threading.Thread(target=warm_social_analysis, args=(uncached_posts, 3), daemon=True).start()
+            threading.Thread(target=warm_social_analysis, args=(uncached_posts, 3, language), daemon=True).start()
 
         image_posts = [post for post in posts if post.get("image_urls")]
         if image_posts:
@@ -1108,7 +1137,7 @@ def fetch_bluesky_feed(limit: int = BLUESKY_FEED_LIMIT) -> dict:
                 post["image_analysis_available"] = False
                 post["image_analysis_reasoning"] = ""
 
-        summary = summarize_demo_feed(posts)
+        summary = summarize_demo_feed(posts, language)
         return {
             "posts": posts,
             "summary": summary,
@@ -1121,10 +1150,10 @@ def fetch_bluesky_feed(limit: int = BLUESKY_FEED_LIMIT) -> dict:
         return {
             "posts": build_demo_feed(),
             "summary": {
-                "top_emotion": "Nötr",
+                "top_emotion": "Neutral" if language == "en" else "Nötr",
                 "avg_truthlens_score": 0,
-                "risk_level": "Düşük",
-                "highlight": "Bluesky akışı alınamadı. Lütfen Bluesky kimlik bilgilerini kontrol edin.",
+                "risk_level": "Low" if language == "en" else "Düşük",
+                "highlight": "The Bluesky feed could not be loaded. Check your Bluesky credentials." if language == "en" else "Bluesky akışı alınamadı. Lütfen Bluesky kimlik bilgilerini kontrol edin.",
                 "total_posts": 0,
             },
             "provider": "demo-fallback",
@@ -1221,13 +1250,14 @@ def build_demo_feed() -> List[dict]:
     ]
 
 
-def summarize_demo_feed(posts: List[dict]) -> dict:
+def summarize_demo_feed(posts: List[dict], language: str = "tr") -> dict:
+    english = language == "en"
     if not posts:
         return {
-            "top_emotion": "Nötr",
+            "top_emotion": "Neutral" if english else "Nötr",
             "avg_truthlens_score": 0,
-            "risk_level": "Düşük",
-            "highlight": "Gösterilecek içerik bulunamadı.",
+            "risk_level": "Low" if english else "Düşük",
+            "highlight": "No posts to display." if english else "Gösterilecek içerik bulunamadı.",
             "total_posts": 0,
         }
 
@@ -1236,23 +1266,25 @@ def summarize_demo_feed(posts: List[dict]) -> dict:
 
     for post in posts:
         total_score += int(post.get("truthlens_score", 0))
-        emotion = str(post.get("emotion", "Nötr")).strip() or "Nötr"
+        emotion = str(post.get("emotion", "Neutral" if english else "Nötr")).strip() or ("Neutral" if english else "Nötr")
         emotion_counts[emotion] = emotion_counts.get(emotion, 0) + 1
 
     top_emotion = max(emotion_counts.items(), key=lambda item: item[1])[0]
+    if english:
+        top_emotion = {"Öfke": "Anger", "Endişe": "Concern", "Heyecan": "Excitement", "Nötr": "Neutral", "Belirsiz": "Unclear"}.get(top_emotion, top_emotion)
     avg_score = round(total_score / len(posts))
 
     if avg_score >= 70:
-        risk_level = "Düşük"
+        risk_level = "Low" if english else "Düşük"
     elif avg_score >= 45:
-        risk_level = "Orta"
+        risk_level = "Medium" if english else "Orta"
     else:
-        risk_level = "Yüksek"
+        risk_level = "High" if english else "Yüksek"
 
     highlight = (
-        "Son akışta öfke ve taraflı dil baskındır; kutuplaştırıcı içeriklerin oranı dikkat çekiyor."
-        if top_emotion in {"Öfke", "Endişe"}
-        else "Akış genel olarak daha tarafsız ve düşük riskli görünüyor."
+        ("The feed is dominated by anger and biased language, with a notable share of polarizing content." if english else "Son akışta öfke ve taraflı dil baskındır; kutuplaştırıcı içeriklerin oranı dikkat çekiyor.")
+        if top_emotion in ({"Anger", "Concern"} if english else {"Öfke", "Endişe"})
+        else ("The feed appears generally more neutral and lower risk." if english else "Akış genel olarak daha tarafsız ve düşük riskli görünüyor.")
     )
 
     return {
@@ -1510,7 +1542,7 @@ def stable_text(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip()).lower()
 
 
-def analysis_cache_key(content: str, source_url: Optional[str] = None) -> str:
+def analysis_cache_key(content: str, source_url: Optional[str] = None, language: str = "tr") -> str:
     normalized_content = stable_text(content)
     normalized_url = (source_url or "").strip().lower()
     model_state = (
@@ -1519,7 +1551,7 @@ def analysis_cache_key(content: str, source_url: Optional[str] = None) -> str:
         f"bul={int(BULLYING_SERVICE.available)}:"
         f"hat={int(HATE_SERVICE.available)}"
     )
-    raw = f"truthlens:v4|{normalized_url}|{normalized_content}|{model_state}"
+    raw = f"truthlens:v5|{language}|{normalized_url}|{normalized_content}|{model_state}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -2475,18 +2507,20 @@ def parse_json_object(raw: str) -> dict:
         return {}
 
 
-def extract_claim_with_gemini(content: str) -> dict:
+def extract_claim_with_gemini(content: str, language: str = "tr") -> dict:
+    output_language = "English" if language == "en" else "Turkish"
     prompt = f"""
-Sen TruthLens AI'nin claim extraction modülüsün. Türkçe metni analiz et.
-Yalnızca JSON döndür ve hiçbir iddia uydurma.
+You are TruthLens AI's claim extraction module. Analyze the input in its original language.
+Write the claim and claims in {output_language}. Keep search_query in the input's original language.
+Return JSON only and never invent claims.
 Metin:
 {content[:2500]}
 Şema:
 {{
   "has_claim": true,
-  "claim": "doğrulanabilir tek ana iddia veya boş metin",
-  "claims": ["iddia 1"],
-  "search_query": "Tavily için kısa, özgül Türkçe arama sorgusu"
+    "claim": "one verifiable main claim, or an empty string, written in {output_language}",
+    "claims": ["claim 1 written in {output_language}"],
+    "search_query": "a concise, specific search query in the input's original language"
 }}
 """
     try:
@@ -2527,38 +2561,40 @@ def evidence_sources_for_claim(claim: str, source_url: Optional[str] = None) -> 
     return evidence
 
 
-def final_reasoning_with_gemini(content: str, claim: str, evidence: List[dict]) -> dict:
+def final_reasoning_with_gemini(content: str, claim: str, evidence: List[dict], language: str = "tr") -> dict:
+    output_language = "English" if language == "en" else "Turkish"
     evidence_text = "\n".join(
         f"KAYNAK {idx}: {item.get('title', '')} | {item.get('url', '')} | {item.get('content', '')[:700]}"
         for idx, item in enumerate(evidence, 1)
     ) or "KAYNAK YOK"
     prompt = f"""
-Sen TruthLens AI'nin final evidence-based reasoning modülüsün. Türkçe yanıt ver.
+You are TruthLens AI's final evidence-based reasoning module. Write every user-facing text value in {output_language}.
+Keep JSON keys, URLs, and evidence relation values in the schema language shown below.
 İçerik: {content[:2500]}
 Ana iddia: {claim or 'Yok'}
 Tavily kanıtları (yalnızca bunları kullan; kaynak uydurma):
 {evidence_text}
 Yalnızca JSON döndür:
 {{
-  "truthfulness": "Doğru / Büyük ölçüde doğru / Kısmen doğru / Yanıltıcı / Yanlış / Kanıt yetersiz",
+    "truthfulness": "a concise truthfulness verdict in {output_language}",
   "confidence": 0.0,
-  "reason": "Türkçe, kısa ve kanıta bağlı açıklama",
+    "reason": "a concise, evidence-based explanation in {output_language}",
   "supporting_urls": [],
   "contradicting_urls": [],
   "evidence": [{{"url": "", "relation": "supports / contradicts / context"}}],
   "score": 0,
   "manipulation": 0,
   "clickbait": 0,
-  "emotion": "Nötr",
+    "emotion": "a short emotion label in {output_language}",
   "polarization_risk": 0,
-  "echo_chamber": "Kısa sosyal risk notu",
-  "ai_rewrite": "Tarafsız yeniden yazım",
-  "social_risk_summary": "Kısa sosyal risk özeti",
-  "validity": "Geçerli / Güncelliğini yitirmiş / Belirsiz",
-  "time_validity": "Kısa zaman notu",
-  "context": "Ek bağlam",
-  "explanation": "Açıklama",
-  "score_breakdown": "Puan kırılımı"
+    "echo_chamber": "a short social risk note in {output_language}",
+    "ai_rewrite": "a neutral rewrite in {output_language}",
+    "social_risk_summary": "a short social risk summary in {output_language}",
+    "validity": "a validity label in {output_language}",
+    "time_validity": "a short time-related note in {output_language}",
+    "context": "additional context in {output_language}",
+    "explanation": "an explanation in {output_language}",
+    "score_breakdown": "a score breakdown in {output_language}"
 }}
 """
     try:
@@ -2569,8 +2605,8 @@ Yalnızca JSON döndür:
         return {}
 
 
-def run_analysis(analyzed_content: str, source_url: Optional[str] = None) -> AnalysisResponse:
-    key = analysis_cache_key(analyzed_content, source_url)
+def run_analysis(analyzed_content: str, source_url: Optional[str] = None, language: str = "tr") -> AnalysisResponse:
+    key = analysis_cache_key(analyzed_content, source_url, language)
     if key in ANALYSIS_CACHE:
         return ANALYSIS_CACHE[key]
 
@@ -2578,7 +2614,7 @@ def run_analysis(analyzed_content: str, source_url: Optional[str] = None) -> Ana
     text_toxicity, auxiliary_toxicity_models = analyze_auxiliary_toxicity(
         analyzed_content, text_toxicity, toxicity_label, toxicity_confidence, model_available
     )
-    claim_data = extract_claim_with_gemini(analyzed_content)
+    claim_data = extract_claim_with_gemini(analyzed_content, language)
     has_claim = bool(claim_data.get("has_claim")) and bool(str(claim_data.get("claim", "")).strip())
     claim = str(claim_data.get("claim", "") or "").strip()
     claims = [str(item).strip() for item in claim_data.get("claims", []) if str(item).strip()]
@@ -2600,39 +2636,56 @@ def run_analysis(analyzed_content: str, source_url: Optional[str] = None) -> Ana
 
     has_claim = bool(claim)
     evidence = evidence_sources_for_claim(
-        claim or str(claim_data.get("search_query", "") or ""),
+        str(claim_data.get("search_query", "") or claim),
         source_url=source_url,
     ) if has_claim else []
     final_reasoning_status = "not_needed_no_claim"
     if has_claim:
-        final_data = final_reasoning_with_gemini(analyzed_content, claim, evidence)
+        final_data = final_reasoning_with_gemini(analyzed_content, claim, evidence, language)
         final_reasoning_status = "success" if final_data else "fallback"
     else:
+        english = language == "en"
         final_data = {
-        "truthfulness": "Kanıt yetersiz",
+        "truthfulness": "Insufficient evidence" if english else "Kanıt yetersiz",
         "confidence": 0.0,
         "reason": (
-            "AI analizi beklemede; claim extraction veya canlı model bağlantısı kurulamadı."
+            "AI analysis is pending; claim extraction or the live model could not be reached."
+            if english and claim_data.get("error")
+            else "No verifiable main claim could be extracted from the text."
+            if english
+            else "AI analizi beklemede; claim extraction veya canlı model bağlantısı kurulamadı."
             if claim_data.get("error")
             else "Metinde web üzerinden doğrulanabilir bir ana iddia çıkarılamadı."
         ),
         "score": 50,
         "manipulation": 0,
         "clickbait": 0,
-        "emotion": "Nötr",
+        "emotion": "Neutral" if english else "Nötr",
         "polarization_risk": 0,
-        "echo_chamber": "Doğrulanabilir iddia bulunmadı.",
+        "echo_chamber": "No verifiable claim was found." if english else "Doğrulanabilir iddia bulunmadı.",
         "ai_rewrite": analyzed_content[:300],
-        "social_risk_summary": "İddia yok; içerik toksisite açısından ayrıca değerlendirildi.",
-        "validity": "Belirsiz",
-        "time_validity": "İddia bulunmadığı için zaman doğrulaması yapılmadı.",
-        "context": "İçerik iddia içermiyor veya iddia çıkarımı başarısız oldu.",
-        "explanation": "Kanıtlanabilir bir iddia bulunamadı.",
-        "score_breakdown": "İddia yok: 50/100 güvenli varsayılan skor.",
+        "social_risk_summary": "No claim was found; toxicity was assessed separately." if english else "İddia yok; içerik toksisite açısından ayrıca değerlendirildi.",
+        "validity": "Unclear" if english else "Belirsiz",
+        "time_validity": "No time verification was performed because no claim was found." if english else "İddia bulunmadığı için zaman doğrulaması yapılmadı.",
+        "context": "The content contains no claim or claim extraction failed." if english else "İçerik iddia içermiyor veya iddia çıkarımı başarısız oldu.",
+        "explanation": "No verifiable claim was found." if english else "Kanıtlanabilir bir iddia bulunamadı.",
+        "score_breakdown": "No claim: safe default score of 50/100." if english else "İddia yok: 50/100 güvenli varsayılan skor.",
     }
 
     toxicity = text_toxicity
-    moderation = decide_moderation_action(toxicity)
+    moderation = decide_moderation_action(toxicity, language)
+    if language == "en":
+        toxicity = ToxicityAnalysis(
+            **{
+                **toxicity.model_dump(),
+                "targeted_person_or_group": "General" if toxicity.targeted_person_or_group == "Genel" else toxicity.targeted_person_or_group,
+                "risk_level": {"Düşük": "Low", "Orta": "Medium", "Yüksek": "High"}.get(toxicity.risk_level, toxicity.risk_level),
+                "context_note": (
+                    f"Toxicity assessment: insult {toxicity.insult}/100, bullying {toxicity.bullying}/100, "
+                    f"hate speech {toxicity.hate_speech}/100."
+                ),
+            }
+        )
     supporting_urls = {normalize_url(str(url)) for url in final_data.get("supporting_urls", []) if str(url).strip()}
     contradicting_urls = {normalize_url(str(url)) for url in final_data.get("contradicting_urls", []) if str(url).strip()}
     # Gemini relation listesi URL listelerinden daha zengin olabilir; ikisini birleştir.
@@ -2709,7 +2762,7 @@ def run_analysis(analyzed_content: str, source_url: Optional[str] = None) -> Ana
             ),
         },
     )
-    analysis_result.verification = compute_truthlens_verification(analysis_result, bool(source_url))
+    analysis_result.verification = compute_truthlens_verification(analysis_result, bool(source_url), language)
     ANALYSIS_CACHE[key] = analysis_result
     return analysis_result
 
@@ -3428,7 +3481,7 @@ def analyze(request_body: AnalysisRequest, request: Request):
     # Parallel execution using ThreadPoolExecutor
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         # Submit run_analysis
-        future_result = executor.submit(run_analysis, analyzed_content, source_url)
+        future_result = executor.submit(run_analysis, analyzed_content, source_url, request_body.language)
         
         # Submit detect_ai_image if primary_image exists
         future_image = None
@@ -3499,14 +3552,24 @@ def analyze(request_body: AnalysisRequest, request: Request):
     # Görsel AI olasılığı tek başına moderasyon sebebi değildir; yalnızca görsel
     # metni veya görsel güvenlik sınıfları sinyal ürettiğinde karar yükseltilir.
     # HER ZAMAN merge yapıyoruz, image_toxicity her zaman set edilmiştir
-    combined_toxicity = merge_toxicity_signals(result.toxicity, image_toxicity)
+    combined_toxicity = merge_toxicity_signals(result.toxicity, image_toxicity, request_body.language)
+    image_response_toxicity = image_toxicity
+    if request_body.language == "en":
+        image_response_toxicity = image_toxicity.model_copy(update={
+            "targeted_person_or_group": "General" if image_toxicity.targeted_person_or_group == "Genel" else image_toxicity.targeted_person_or_group,
+            "risk_level": {"Düşük": "Low", "Orta": "Medium", "Yüksek": "High"}.get(image_toxicity.risk_level, image_toxicity.risk_level),
+            "context_note": (
+                f"Image toxicity assessment: insult {image_toxicity.insult}/100, "
+                f"bullying {image_toxicity.bullying}/100, hate speech {image_toxicity.hate_speech}/100."
+            ),
+        })
     result = result.model_copy(update={
         "toxicity": combined_toxicity,
         "toxicity_label": "toxic" if max(combined_toxicity.insult, combined_toxicity.bullying, combined_toxicity.hate_speech) > 0 else result.toxicity_label,
         "toxicity_confidence": max(result.toxicity_confidence, 0.0),
-        "moderation": decide_moderation_action(combined_toxicity),
+        "moderation": decide_moderation_action(combined_toxicity, request_body.language),
         "image_text": image_text,
-        "image_toxicity": image_toxicity,
+        "image_toxicity": image_response_toxicity,
         "image_moderation_note": image_moderation_note,
     })
 
@@ -3587,20 +3650,20 @@ def analyze(request_body: AnalysisRequest, request: Request):
             reasoning="Kaynak zinciri, yeni claim → Tavily → Gemini kanıt akışındaki gerçek URL’lerden oluşturuldu.",
         )
 
-    content_hash = analysis_cache_key(analyzed_content, source_url)
+    content_hash = analysis_cache_key(analyzed_content, source_url, request_body.language)
     result = result.model_copy(update={
         "content_hash": content_hash,
         "image_ai_probability": image_ai_probability,
         "image_is_ai": image_is_ai,
         "image_analysis_available": image_analysis_available,
         "image_text": image_text,
-        "image_toxicity": image_toxicity,
+        "image_toxicity": image_response_toxicity,
         "image_moderation_note": image_moderation_note,
         "source_analysis": source_analysis if isinstance(source_analysis, SourceAnalysis) else SourceAnalysis(**source_analysis),
     })
 
     result = result.model_copy(update={
-        "verification": compute_truthlens_verification(result, has_source_url=bool(source_url)),
+        "verification": compute_truthlens_verification(result, has_source_url=bool(source_url), language=request_body.language),
     })
 
     user = get_current_user_from_request(request)
@@ -3626,7 +3689,8 @@ def analyze_url(payload: dict, request: Request):
     url = str(payload.get("url", "")).strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL gerekli.")
-    return analyze(AnalysisRequest(content=url), request)
+    language = payload.get("language", "tr")
+    return analyze(AnalysisRequest(content=url, language=language), request)
 
 
 @app.post("/nsosyal/moderation-check")
@@ -3638,7 +3702,7 @@ def nsosyal_moderation_check(payload: dict, request: Request):
     if len(content) > 10000:
         raise HTTPException(status_code=422, detail="Gönderi metni 10.000 karakteri aşamaz.")
 
-    result = analyze(AnalysisRequest(content=content), request)
+    result = analyze(AnalysisRequest(content=content, language=payload.get("language", "tr")), request)
     moderation = result.moderation
     publish_allowed = moderation.action in {"izin_ver", "etiketle"}
     publish_state = "allow_with_label" if moderation.action == "etiketle" else (
@@ -3678,24 +3742,24 @@ def nsosyal_moderation_check(payload: dict, request: Request):
 
 
 @app.get("/demo-feed")
-def demo_feed():
+def demo_feed(language: Literal["tr", "en"] = "tr"):
     posts = build_demo_feed()
     return {
         "posts": posts,
-        "summary": summarize_demo_feed(posts),
+        "summary": summarize_demo_feed(posts, language),
     }
 
 
 @app.get("/bluesky-feed")
-def bluesky_feed(limit: int = BLUESKY_FEED_LIMIT):
-    payload = fetch_bluesky_feed(limit=limit)
+def bluesky_feed(limit: int = BLUESKY_FEED_LIMIT, language: Literal["tr", "en"] = "tr"):
+    payload = fetch_bluesky_feed(limit=limit, language=language)
     if payload.get("posts"):
         return payload
 
     demo_posts = build_demo_feed()
     return {
         "posts": demo_posts,
-        "summary": summarize_demo_feed(demo_posts),
+        "summary": summarize_demo_feed(demo_posts, language),
         "provider": "demo-fallback",
         "warning": payload.get("warning") or "Bluesky live akışı alınamadı, demo akış gösteriliyor.",
     }
@@ -3783,7 +3847,8 @@ def demo_feed_analyze(payload: dict):
     if not content:
         raise HTTPException(status_code=400, detail="Analiz edilecek içerik gerekli.")
 
-    analysis = run_analysis(content)
+    language = payload.get("language", "tr")
+    analysis = run_analysis(content, language=language)
     toxicity = analysis.toxicity.model_dump()
     post = {
         "id": payload.get("id") or f"demo-{uuid.uuid4().hex[:8]}",

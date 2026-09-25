@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useState, type ReactNode } from "react";
 
 interface Source {
   title: string;
@@ -188,8 +188,284 @@ interface FeedPost {
 }
 
 type InputMode = "text" | "url";
+type Language = "tr" | "en";
+
+const UI_TRANSLATIONS: Record<string, string> = {
+  "TruthLens Oturumu": "TruthLens Session",
+  "Merhaba, ": "Hello, ",
+  "Misafir kullanıcı": "Guest user",
+  "Çıkış": "Log out",
+  "Giriş": "Log in",
+  "Kayıt": "Register",
+  "Ad soyad": "Full name",
+  "e-posta": "Email",
+  "şifre": "Password",
+  "Kayıt ol": "Create account",
+  "Giriş yap": "Log in",
+  "Gerçeği,": "Check the truth,",
+  "yapay zekâ ile": "with AI",
+  "analiz et.": "analyze it.",
+  "Sosyal medya gönderilerini, haberleri ve iddiaları analiz et. Güvenilirlik, manipülasyon, clickbait ve içerikteki önemli bağlamı incele.": "Analyze social media posts, news, and claims. Examine credibility, manipulation, clickbait, and important context.",
+  "🔍 Sosyal Medyada Dene": "🔍 Try the social feed",
+  "📝 Metin Analizi": "📝 Text analysis",
+  "🔗 Link Analizi": "🔗 Link analysis",
+  "Analiz etmek istediğin içeriği yapıştır": "Paste the content you want to analyze",
+  "Örneğin: NASA, Ay'ın Dünya'ya yaklaşmaya başladığını ve 2030 yılında Dünya'ya çarpacağını açıkladı.": "Example: NASA announced that the Moon is moving closer to Earth and will collide with Earth in 2030.",
+  " karakter": " characters",
+  "Analiz ediliyor...": "Analyzing...",
+  "Analiz Et": "Analyze",
+  "Analiz etmek istediğin gönderinin bağlantısını yapıştır": "Paste the link to the post you want to analyze",
+  "Nasıl çalışır?": "How it works",
+  "Gönderinin bağlantısını bırak. TruthLens AI, sayfadaki içeriği inceleyerek iddiaları, bağlamı ve güvenilir kaynakları araştırır.": "Paste a post link. TruthLens AI examines its content and researches the claims, context, and reliable sources.",
+  "Gönderi inceleniyor...": "Reviewing post...",
+  "Linki Analiz Et": "Analyze link",
+  "Lütfen analiz edilecek bir içerik gir.": "Enter some content to analyze.",
+  "Lütfen analiz edilecek bir bağlantı gir.": "Enter a link to analyze.",
+  "Geçerli bir bağlantı gir. Örneğin: https://nsosyal.com/post/...": "Enter a valid link. For example: https://nsosyal.com/post/...",
+  "Analiz isteği başarısız oldu.": "The analysis request failed.",
+  "Analiz sırasında bir hata oluştu. Backend'in çalıştığından emin ol.": "An error occurred during analysis. Make sure the backend is running.",
+  "Context AI": "Context AI",
+  "Zaman, bağlam ve olay uyumsuzluğunu çözümler.": "Finds inconsistencies in timing, context, and events.",
+  "Yankı Odası": "Echo chamber",
+  "Kullanıcı profili ve okuma geçmişini tek görüşlü akış riskiyle eşleştirir.": "Compares the user profile and reading history with the risk of a one-sided feed.",
+  "Kutuplaştırma Ölçer": "Polarization meter",
+  "İçerik dilindeki kutuplaştırma ve duygusal etkilenme ihtimalini ölçer.": "Measures polarization and emotional influence in the language of the content.",
+  "AI Yeniden Yazım": "AI rewrite",
+  "Paylaşım öncesi tarafsızlaştırılmış metin önerir.": "Suggests a more neutral version before sharing.",
+  "İnsan Denetimi": "Human review",
+  "Riskli içeriklerde otomatik silme yerine insan incelemesini öne çıkarır.": "Prioritizes human review over automatic removal for risky content.",
+  "Son analiz geçmişi": "Recent analysis history",
+  "Henüz kayıtlı analiz bulunmuyor.": "No saved analyses yet.",
+  "Metin analizi": "Text analysis",
+  "Analiz sonucu mevcut": "Analysis result available",
+  "Yükleniyor...": "Loading...",
+  "Yenile": "Refresh",
+  "Sosyal Güven Metrikleri": "Social trust metrics",
+  "TruthLens Sosyal Güven Konsolu": "TruthLens Social Trust Console",
+  "Risk Eğilimi": "Risk trend",
+  "Bu kullanıcı için anlık risk": "Current risk for this user",
+  "Oturum bekleniyor": "Waiting for a session",
+  "Son Analiz Güven Skoru": "Latest analysis trust score",
+  "Son analizdeki gerçeklik skoru": "Truth score of the latest analysis",
+  "Kayıtlı Analiz": "Saved analyses",
+  "Bu hesapta saklanan analiz": "Analyses saved to this account",
+  "Misafir": "Guest",
+  "Analiz bekleniyor": "Waiting for analysis",
+  "İçerik analiz ediliyor...": "Analyzing content...",
+  "İddialar, bağlam ve güvenilir kaynaklar araştırılıyor.": "Researching claims, context, and reliable sources.",
+  "TruthLens içerik güvenliği": "TruthLens content safety",
+  "Bu içerik geçici olarak gizlendi": "This content has been temporarily hidden",
+  "TruthLens, URL'den alınan gönderide inceleme gerektiren bir risk tespit etti. İçeriği görüntülemek için aşağıdaki seçeneği kullanabilirsin.": "TruthLens detected a risk in this linked post that requires review. Use the option below if you want to view it.",
+  "Önerilen işlem": "Recommended action",
+  "Yine de görüntüle": "View anyway",
+  "İçeriği gizli tut": "Keep content hidden",
+  "İnsan incelemesi öneriliyor. Otomatik silme yapılmaz.": "Human review is recommended. No automatic removal will occur.",
+  "Gerçeklik Skoru": "Truth score",
+  "Kanıt kapsamı tamamlandı": "Evidence review complete",
+  "TruthLens rozet açıklaması": "TruthLens badge details",
+  "Bu içerik doğrulama rozetinin tüm koşullarını geçmedi.": "This content did not meet all requirements for the verification badge.",
+  "Manipülasyon Riski": "Manipulation risk",
+  "Clickbait Riski": "Clickbait risk",
+  "Geçerlilik": "Validity",
+  "Duygusal Ton": "Emotional tone",
+  "Sonuç": "Result",
+  "Zaman ve geçerlilik analizi": "Timing and validity analysis",
+  "Bağlamsal toksisite analizi": "Contextual toxicity analysis",
+  "Kalibre edilmiş kesinlik değildir.": "This is not calibrated certainty.",
+  "Hakaret": "Insult",
+  "Zorbaca davranış": "Bullying",
+  "Nefret dili · raw": "Hate speech · raw",
+  "Hedef / bağlam": "Target / context",
+  "Risk seviyesi": "Risk level",
+  "Ayrı toxicity modelleri": "Separate toxicity models",
+  "Moderasyon kararı": "Moderation decision",
+  "Önerilen platform aksiyonu": "Recommended platform action",
+  "Toplam risk": "Aggregate risk",
+  "İnsan incelemesi gerekli": "Human review required",
+  "Otomatik ön değerlendirme": "Automated preliminary assessment",
+  "İtiraza açık": "Appealable",
+  "Görsel kaynaklı moderasyon sinyali": "Image-based moderation signal",
+  "Görseldeki metin/güvenlik sinyali metin analizine eklenerek moderasyon kararına dahil edildi.": "Text and safety signals from the image were added to the text analysis and included in the moderation decision.",
+  "Görselde okunan metin:": "Text detected in image:",
+  "Bu moderasyon kararına itiraz et": "Appeal this moderation decision",
+  "Sistem otomatik silme yapmaz; itiraz insan incelemesi için kaydedilir.": "The system does not automatically remove content; appeals are saved for human review.",
+  "İtirazın kaydedildi ve inceleme sırasına alındı.": "Your appeal was saved and queued for review.",
+  "Neden yanlış olduğunu düşündüğünü yaz...": "Explain why you think this decision is incorrect...",
+  "Gönderiliyor...": "Sending...",
+  "İtiraz Gönder": "Submit appeal",
+  "Polarizasyon riski": "Polarization risk",
+  "Kutuplaştırma": "Polarization",
+  "Neden?": "Why?",
+  "Puan kırılımı": "Score breakdown",
+  "Sosyal risk özeti": "Social risk summary",
+  "AI paylaşım önerisi": "AI sharing suggestion",
+  "Görsel Analizi": "Image analysis",
+  "AI Görsel İhtimali": "Probability of AI-generated image",
+  "Kullanılamadı": "Unavailable",
+  "Görselde okunan metin": "Text detected in image",
+  "AI pipeline durumu": "AI pipeline status",
+  "Kaynak Zinciri": "Source chain",
+  "Kaynakları Gizle": "Hide sources",
+  "Kaynakları Gör": "View sources",
+  "Tespit edilen iddialar": "Detected claims",
+  "Doğrulanabilir bir iddia tespit edilemedi.": "No verifiable claim was detected.",
+  "Eksik veya önemli bağlam": "Missing or important context",
+  "Destekleyen kaynaklar": "Supporting sources",
+  "Bu iddiayı destekleyen kaynak bulunamadı.": "No sources supporting this claim were found.",
+  "Çelişkili kaynaklar": "Contradicting sources",
+  "Çelişkili kaynak bulunamadı.": "No contradicting sources were found.",
+  "Kaynaklar": "Sources",
+  "Güvenilir kaynak bulunamadı veya yeterli kanıt elde edilemedi.": "No reliable sources or sufficient evidence were found.",
+  "TruthLens AI — Bilgi güvenilirliği ve dijital içerik analiz sistemi": "TruthLens AI — Information credibility and digital content analysis",
+  "Canlı Bluesky Feed": "Live Bluesky feed",
+  "TruthLens akışı": "TruthLens feed",
+  "Kapat": "Close",
+  "Ana Akış": "Home feed",
+  "Beğenilenler": "Liked posts",
+  "Profil": "Profile",
+  "Ayarlar": "Settings",
+  "Sosyal platform navigasyonu": "Social platform navigation",
+  "Bluesky canlı sağlayıcı": "Live Bluesky provider",
+  "Yerel demo sağlayıcı": "Local demo provider",
+  "Topluluk uyarısı": "Community alert",
+  "Ortalama skor": "Average score",
+  "Gönderi sayısı": "Post count",
+  "NSosyal Entegrasyon Önizlemesi": "NSosyal integration preview",
+  "Gönderi yayınlanmadan önce TruthLens moderasyon adapteri toksisiteyi ve insan incelemesi gereğini kontrol eder.": "Before a post is published, the TruthLens moderation adapter checks for toxicity and whether human review is needed.",
+  "Adapter v1 · Hazır": "Adapter v1 · Ready",
+  "NSosyal’de paylaşmak istediğin metni yaz...": "Write the text you want to share on NSosyal...",
+  "Toksisite ve moderasyon kontrol ediliyor...": "Checking toxicity and moderation...",
+  "Gönderiyi moderasyondan geçir": "Check post with moderation",
+  "Gerçek platforma otomatik paylaşım yapılmaz; bu alan entegrasyon sözleşmesini simüle eder.": "Nothing is automatically posted to a real platform; this panel simulates the integration contract.",
+  "TruthLens karar motoru sonucu": "TruthLens decision engine result",
+  "Yayın akışına uygun": "Eligible for publishing",
+  "İnsan incelemesine al": "Send for human review",
+  "Nefret:": "Hate speech:",
+  "Aksiyon:": "Action:",
+  "İnsan onayı:": "Human approval:",
+  "Gerekli": "Required",
+  "Gerekmiyor": "Not required",
+  "Otomatik silme: Kapalı": "Automatic removal: Off",
+  "NSosyal demo akışına ekle": "Add to NSosyal demo feed",
+  "Bluesky’ye gerçek gönder": "Post to Bluesky",
+  "Gönderi kontrollü NSosyal demo akışına eklendi.": "The post was added to the moderated NSosyal demo feed.",
+  "🤖 TruthLens mini analizleri güncelleniyor...": "🤖 Updating TruthLens mini analyses...",
+  "Bu paylaşım TruthLens analizinden geçti; sonuç kesin doğruluk garantisi değildir.": "This post was analyzed by TruthLens; the result is not a guarantee of truth.",
+  "Foto AI:": "AI image:",
+  "Analiz ediliyor": "Analyzing",
+  "Kısa Özet:": "Summary:",
+  "Bu içerik TruthLens tarafından incelendi.": "This content was reviewed by TruthLens.",
+  "🤖 TruthLens analiz ediliyor...": "🤖 TruthLens is analyzing...",
+  "Risk:": "Risk:",
+  "Kutuplaşma:": "Polarization:",
+  "Duygu:": "Sentiment:",
+  "Doğruluk / Güvenilirlik:": "Truth / credibility:",
+  "♥ Beğenildi": "♥ Liked",
+  "♡ Beğen": "♡ Like",
+  "🔁 Yeniden paylaş": "🔁 Repost",
+  "💬 Yanıtla": "💬 Reply",
+  "Detaylı Analiz": "Full analysis",
+  "🤖 TruthLens analizi beklemede. Gönderi görünür durumda.": "🤖 TruthLens analysis is pending. The post remains visible.",
+  "Daha fazla yok": "No more posts",
+  "Daha fazla": "Load more",
+  "Kişisel koleksiyon": "Personal collection",
+  "Henüz beğenilen gönderi yok. Ana Akış’ta kalp düğmesine bas.": "No liked posts yet. Press the heart button in the Home feed.",
+  "Beğeniyi kaldır": "Unlike",
+  "TruthLens Demo Profili": "TruthLens demo profile",
+  "Gönderi": "Posts",
+  "Beğeni": "Likes",
+  "Sağlayıcı": "Provider",
+  "Bu profil paneli aynı sosyal arayüz içinde TruthLens analiz geçmişini ve platform sağlayıcısını gösterir. Gerçek Bluesky profil istatistikleri, sağlayıcı kimlik bilgileri yapılandırıldığında adapter üzerinden alınabilir.": "This profile panel shows TruthLens analysis history and the platform provider in the social interface. Real Bluesky profile statistics are available through the adapter when provider credentials are configured.",
+  "Platform ayarları": "Platform settings",
+  "Sosyal deneyim ayarları": "Social experience settings",
+  "Yayın öncesi moderasyon": "Pre-publication moderation",
+  "NSosyal adapteri her gönderiyi yayın öncesi kontrol eder.": "The NSosyal adapter checks every post before publication.",
+  "Açık": "On",
+  "Otomatik silme": "Automatic removal",
+  "Geri dönüşü olmayan işlemler insan onayı olmadan çalışmaz.": "Irreversible actions require human approval.",
+  "Kapalı": "Off",
+  "NSosyal API doğrulanana kadar güvenli fallback.": "A safe fallback until the NSosyal API is verified.",
+  "Bu içerik TruthLens'in doğruluk, güncellik, toksik bağlam ve risk kontrollerinin tamamından geçti.": "This content passed all TruthLens truthfulness, freshness, toxicity-context, and risk checks.",
+  "Kaynak zinciri kesin olarak belirlenemedi.": "The source chain could not be determined with certainty.",
+  "Birincil kaynak adayı": "Primary source candidate",
+  "Tarih bilinmiyor": "Date unknown",
+  "Birincil olasılık:": "Primary-source probability:",
+  "Eşleşme:": "Match:",
+  "Kaynağı Aç ↗": "Open source ↗",
+  "Düşük eşleşme — incele": "Low match — review",
+  "İlgili aday kaynak": "Relevant source candidate",
+  "Kaynak değerlendirmesi timeout nedeniyle tamamlanamadı; bu analiz için gösterilebilir aday bağlantı bulunamadı.": "Source assessment timed out; no candidate links are available for this analysis.",
+  "Ek bağlam bulunamadı.": "No additional context was found.",
+  "İncelenen ana iddia": "Main claim reviewed",
+  "TruthLens doğrulaması tamamlanmadı": "TruthLens verification is incomplete",
+  "Doğruluk sonucu rozet için yeterince güçlü değil.": "The truthfulness verdict is not strong enough for the badge.",
+  "İçeriğin geçerlilik/güncellik durumu rozet için uygun değil.": "The content's validity or freshness is not suitable for the badge.",
+  "Toksisite risk seviyesi düşük değil.": "The toxicity risk level is not low.",
+  "Toksisite sinyallerinden en az biri 20/100 üzerinde.": "At least one toxicity signal is above 20/100.",
+  "Birincil kaynak durumu belirsiz.": "The primary source status is uncertain.",
+  "İzin verildi": "Allowed",
+  "Doğru": "True",
+  "Büyük ölçüde doğru": "Mostly true",
+  "Kısmen doğru": "Partly true",
+  "Yanıltıcı": "Misleading",
+  "Yanlış": "False",
+  "Kanıt yetersiz": "Insufficient evidence",
+  "Geçerli": "Valid",
+  "Güncelliğini yitirmiş": "Outdated",
+  "Belirsiz": "Unclear",
+  "Nötr": "Neutral",
+  "Düşük": "Low",
+  "Orta": "Medium",
+  "Yüksek": "High",
+  "Genel": "General",
+  "Nefret söylemi": "Hate speech",
+  "Saldırgan / aşağılayıcı içerik": "Offensive / demeaning content",
+  "Nötr / normal içerik": "Neutral / normal content",
+  "Model kullanılamadı": "Model unavailable",
+};
+
+function translateText(value: string, language: Language): string {
+  if (language === "tr") return value;
+  const trimmed = value.trim();
+  const normalized = trimmed.replace(/\s+/g, " ");
+  const translated = UI_TRANSLATIONS[normalized];
+  if (translated) return value.replace(trimmed, translated);
+  if (normalized.startsWith("Merhaba, ")) {
+    return value.replace(trimmed, `Hello, ${normalized.slice("Merhaba, ".length)}`);
+  }
+  const match = trimmed.match(/^(\d+) kayıtlı analiz bulundu\.$/);
+  if (match) return value.replace(trimmed, `${match[1]} saved analyses found.`);
+  const riskMatch = trimmed.match(/^Risk: (Düşük|Orta|Yüksek)$/);
+  if (riskMatch) return value.replace(trimmed, `Risk: ${UI_TRANSLATIONS[riskMatch[1]]}`);
+  return value;
+}
+
+function localizeChildren(children: ReactNode, language: Language): ReactNode {
+  return Children.map(children, (child) => {
+    if (typeof child === "string") return translateText(child, language);
+    if (!isValidElement<Record<string, unknown>>(child)) return child;
+    const props = child.props;
+    const localizedProps = { ...props };
+    for (const attribute of ["placeholder", "title", "aria-label"] as const) {
+      if (typeof props[attribute] === "string") {
+        localizedProps[attribute] = translateText(props[attribute], language);
+      }
+    }
+    return cloneElement(
+      child,
+      localizedProps,
+      localizeChildren(props.children as ReactNode, language),
+    );
+  });
+}
+
+function LocalizedContent({ children, language }: { children: ReactNode; language: Language }) {
+  return <>{localizeChildren(children, language)}</>;
+}
 
 export default function Home() {
+  const [language, setLanguage] = useState<Language>("tr");
+  const [lastAnalysisRequest, setLastAnalysisRequest] = useState<{ endpoint: string; body: Record<string, string> } | null>(null);
   const [mode, setMode] = useState<InputMode>("text");
 
   const [content, setContent] = useState("");
@@ -292,12 +568,23 @@ export default function Home() {
     }
   }
   useEffect(() => {
+    const storedLanguage = window.localStorage.getItem("truthlens_language");
+    if (storedLanguage === "tr" || storedLanguage === "en") {
+      window.setTimeout(() => setLanguage(storedLanguage), 0);
+    }
     const storedToken = window.localStorage.getItem("truthlens_token");
     if (storedToken) {
       setToken(storedToken);
       void fetchCurrentUser(storedToken);
     }
   }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    document.title = language === "en"
+      ? "TruthLens AI — Social Trust Analysis System"
+      : "TruthLens AI — Sosyal Güven Analiz Sistemi";
+  }, [language]);
 
   async function fetchModerationHistory(activeToken: string) {
     setModerationHistoryLoading(true);
@@ -399,13 +686,13 @@ export default function Home() {
     }
   }
 
-  async function openDemoFeed() {
+  async function openDemoFeed(requestLanguage: Language = language) {
     setFeedOpen(true);
     setError("");
     setFeedLimit(5);
 
     try {
-      const liveResponse = await fetch(`${API_BASE_URL}/bluesky-feed?limit=5`);
+      const liveResponse = await fetch(`${API_BASE_URL}/bluesky-feed?limit=5&language=${requestLanguage}`);
       const liveData = await liveResponse.json();
 
       if (!liveResponse.ok) {
@@ -418,7 +705,7 @@ export default function Home() {
       setFeedSource(liveData?.provider === "bluesky" ? "live" : "demo");
 
       if (posts.length === 0) {
-        const fallbackResponse = await fetch(`${API_BASE_URL}/demo-feed`);
+        const fallbackResponse = await fetch(`${API_BASE_URL}/demo-feed?language=${requestLanguage}`);
         const fallbackData = await fallbackResponse.json();
 
         if (fallbackResponse.ok) {
@@ -431,7 +718,7 @@ export default function Home() {
       console.error(err);
 
       try {
-        const fallbackResponse = await fetch(`${API_BASE_URL}/demo-feed`);
+        const fallbackResponse = await fetch(`${API_BASE_URL}/demo-feed?language=${requestLanguage}`);
         const fallbackData = await fallbackResponse.json();
 
         if (fallbackResponse.ok) {
@@ -458,7 +745,7 @@ export default function Home() {
     setError("");
 
     try {
-      const liveResponse = await fetch(`${API_BASE_URL}/bluesky-feed?limit=${nextLimit}`);
+      const liveResponse = await fetch(`${API_BASE_URL}/bluesky-feed?limit=${nextLimit}&language=${language}`);
       const liveData = await liveResponse.json();
 
       if (!liveResponse.ok) {
@@ -495,7 +782,7 @@ export default function Home() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ content: draft }),
+        body: JSON.stringify({ content: draft, language }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.detail || "NSosyal moderasyon ön kontrolü başarısız.");
@@ -609,9 +896,11 @@ export default function Home() {
 
   async function sendAnalysis(
     endpoint: string,
-    body: Record<string, string>
+    body: Record<string, string>,
+    requestLanguage: Language = language,
   ): Promise<AnalysisResult | null> {
     let analysisData: AnalysisResult | null = null;
+    setLastAnalysisRequest({ endpoint, body });
     setLoading(true);
     setError("");
     setResult(null);
@@ -628,7 +917,7 @@ export default function Home() {
             "Content-Type": "application/json",
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ ...body, language: requestLanguage }),
         }
       );
 
@@ -739,8 +1028,18 @@ export default function Home() {
     setUrlModerationOverride(false);
   }
 
+  function changeLanguage(nextLanguage: Language) {
+    setLanguage(nextLanguage);
+    window.localStorage.setItem("truthlens_language", nextLanguage);
+    if ((result || loading) && lastAnalysisRequest) {
+      void sendAnalysis(lastAnalysisRequest.endpoint, lastAnalysisRequest.body, nextLanguage);
+    }
+    if (feedOpen) void openDemoFeed(nextLanguage);
+  }
+
   return (
     <main className="min-h-screen bg-slate-950 px-4 py-12 text-white">
+      <LocalizedContent language={language}>
       <div className="mx-auto max-w-5xl">
 
         {/* AUTH BAR */}
@@ -756,6 +1055,16 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-3">
+              <label className="sr-only" htmlFor="language-select">Dil</label>
+              <select
+                id="language-select"
+                value={language}
+                onChange={(event) => changeLanguage(event.target.value as Language)}
+                className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-semibold text-slate-200 outline-none focus:border-blue-500"
+              >
+                <option value="tr">Türkçe</option>
+                <option value="en">English</option>
+              </select>
               {user ? (
                 <button
                   onClick={() => {
@@ -849,7 +1158,7 @@ export default function Home() {
 
           <div className="mt-8 flex justify-center">
             <button
-              onClick={openDemoFeed}
+              onClick={() => void openDemoFeed()}
               className="rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 py-3 font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:brightness-110"
             >
               🔍 Sosyal Medyada Dene
@@ -2340,6 +2649,7 @@ export default function Home() {
         )}
 
       </div>
+      </LocalizedContent>
     </main>
   );
 }
