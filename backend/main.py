@@ -1,6 +1,7 @@
-import json
 import os
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface_cache"
+import json
 import re
 import hashlib
 import sqlite3
