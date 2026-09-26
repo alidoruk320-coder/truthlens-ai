@@ -1,3 +1,8 @@
+İMPORTANT!!
+
+You can change the language to English on my platform. (From the top of the screen)
+
+
 TruthLens AI
 Explainable Turkish Social Media Security and Verification Platform
 TruthLens AI is a decision-support prototype that analyzes social media content for general toxicity, insults, bullying, hate speech, visual/OCR signals, and verifiable claims. Its moderation and human-in-the-loop decision engine is called DiyalogKalkanı (DialogueShield).
