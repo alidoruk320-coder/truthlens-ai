@@ -1,26 +1,11 @@
 services:
   - type: web
-    name: truthlens-api
+    name: truthlens-backend
     runtime: python
-    plan: pro
-    rootDir: backend
+    region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
-    healthCheckPath: /health
-    disk:
-      name: truthlens-data
-      mountPath: /var/data
-      sizeGB: 20
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    rootDir: backend
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.11
-      - key: DATABASE_PATH
-        value: /var/data/truthlens.db
-      - key: HF_HOME
-        value: /var/data/huggingface
-      - key: ALLOWED_ORIGINS
-        sync: false
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: TAVILY_API_KEY
-        sync: false
+        value: 3.11.10
