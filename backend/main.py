@@ -1,7 +1,7 @@
 import os
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface_cache"
-TOXICITY_MODELS_ENABLED = os.getenv("TOXICITY_MODELS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+TOXICITY_MODELS_ENABLED = os.getenv("TOXICITY_MODELS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 import json
 import re
 import hashlib
