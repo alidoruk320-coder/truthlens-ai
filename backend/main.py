@@ -1,6 +1,7 @@
 import os
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface_cache"
+TOXICITY_MODELS_ENABLED = os.getenv("TOXICITY_MODELS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 import json
 import re
 import hashlib
@@ -23,18 +24,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
 
-try:
-    import torch
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    from peft import PeftModel
-except Exception:
+if TOXICITY_MODELS_ENABLED:
+    try:
+        import torch
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        from peft import PeftModel
+    except Exception:
+        torch = None
+        AutoTokenizer = None
+        AutoModelForSequenceClassification = None
+        PeftModel = None
+        MODEL_IMPORT_ERROR = "torch/transformers/peft bağımlılıkları import edilemedi."
+    else:
+        MODEL_IMPORT_ERROR = ""
+else:
     torch = None
     AutoTokenizer = None
     AutoModelForSequenceClassification = None
     PeftModel = None
-    MODEL_IMPORT_ERROR = "torch/transformers/peft bağımlılıkları import edilemedi."
-else:
-    MODEL_IMPORT_ERROR = ""
+    MODEL_IMPORT_ERROR = "Toksisite modelleri TOXICITY_MODELS_ENABLED ile devre dışı bırakıldı."
 from atproto import Client
 
 try:
@@ -258,6 +266,9 @@ class ToxicityModelService:
         self._lock = threading.Lock()
 
     def load_once(self) -> bool:
+        if not TOXICITY_MODELS_ENABLED:
+            self.error = MODEL_IMPORT_ERROR
+            return False
         if self.available:
             return True
         with self._lock:
@@ -357,6 +368,9 @@ class MultiClassModelService:
         self._lock = threading.Lock()
 
     def load_once(self) -> bool:
+        if not TOXICITY_MODELS_ENABLED:
+            self.error = MODEL_IMPORT_ERROR
+            return False
         if self.available:
             return True
         with self._lock:
@@ -1527,6 +1541,9 @@ init_db()
 
 @app.on_event("startup")
 def preload_custom_toxicity_model() -> None:
+    if not TOXICITY_MODELS_ENABLED:
+        print("[TruthLens] Toxicity models disabled; using fallback analysis.")
+        return
     # Modeller request başına değil, süreç başlangıcında bir kez yüklenir.
     TOXICITY_SERVICE.load_once()
     INSULT_SERVICE.load_once()
