@@ -1,5 +1,6 @@
 import json
 import os
+os.environ["HF_HOME"] = "/tmp/huggingface_cache"
 import re
 import hashlib
 import sqlite3
