@@ -1,27 +1,19 @@
-# TruthLens AI
+TruthLens AI
+Explainable Turkish Social Media Security and Verification Platform
+TruthLens AI is a decision-support prototype that analyzes social media content for general toxicity, insults, bullying, hate speech, visual/OCR signals, and verifiable claims. Its moderation and human-in-the-loop decision engine is called DiyalogKalkanı (DialogueShield).
+The system does not automatically or irreversibly delete content or penalize users. Instead, it presents reversible recommendations to the moderator—such as allow, tag, send to human review, or limit visibility—by displaying the model output, source chain, rationale, and risk level.
+Important: This README has been prepared based on the direct Google Gemini architecture used in this project. NaraRouter, Cohere, or Laguna are not used in the active backend flow. Older experimental scripts are not part of this architecture.
 
-## Açıklanabilir Türkçe Sosyal Medya Güvenliği ve Doğrulama Platformu
-
-TruthLens AI, sosyal medya içeriklerini **genel toksisite, hakaret, zorbaca davranış, nefret söylemi, görsel/OCR sinyalleri ve doğrulanabilir iddialar** bakımından analiz eden bir karar destek prototipidir. Projenin moderasyon ve insan-in-the-loop karar motoru **DiyalogKalkanı** olarak adlandırılır.
-
-Sistem otomatik ve geri döndürülemez biçimde içerik silmez veya kullanıcı cezalandırmaz. Bunun yerine model çıktısını, kaynak zincirini, gerekçeyi ve risk seviyesini göstererek moderatöre **izin ver, etiketle, insan incelemesine al veya görünürlüğü sınırla** gibi geri döndürülebilir öneriler sunar.
-
-> **Önemli:** Bu README, projedeki doğrudan Google Gemini mimarisine göre hazırlanmıştır. Aktif backend akışında NaraRouter, Cohere veya Laguna kullanılmaz. Eski deneysel scriptler bu mimarinin parçası değildir.
-
----
-
-## 1. Proje nasıl çalışır?
-
-TruthLens analiz akışı aşağıdaki sırayla çalışır:
-
-```
-Kullanıcı metni / URL / görsel
+1. How the Project Works
+The TruthLens analysis pipeline operates in the following sequence:
+Plaintext
+User Text / URL / Image
           │
-          ├── Genel BERT+LoRA toxicity modeli
-          ├── Hakaret modeli
-          ├── Zorbalık modeli
-          ├── Nefret dili modeli
-          └── OCR ve görsel sinyalleri
+          ├── General BERT+LoRA toxicity model
+          ├── Insult model
+          ├── Bullying model
+          ├── Hate speech model
+          └── OCR and visual signals
                     │
                     ▼
           Gemini 3.5 Flash Lite
@@ -35,64 +27,47 @@ Kullanıcı metni / URL / görsel
           Final reasoning
                     │
                     ▼
-          DiyalogKalkanı moderasyon önerisi
+          DiyalogKalkanı moderation recommendation
                     │
                     ▼
-          Next.js sonuç ekranı + kaynak zinciri
-```
+          Next.js results screen + source chain
+Models Used
+Task	Model	Output
+General Toxicity	Doruk2404/truthlens-toxic-lora	toxic or non-toxic and binary probability
+Insult	nanelimon/bert-base-turkish-offensive	Real class probabilities of the insult model
+Bullying	nanelimon/bert-base-turkish-bullying	Bullying sub-classes and total score vs. Neutral
+Hate Speech	ctoraman/hate-speech-berturk	Neutral/Normal, Offensive, Hate probabilities
+Claim Reasoning	Gemini 3.5 Flash Lite	Claim extraction and final evaluation
+Evidence Search	Tavily	Source candidates and URLs
+The general BERT+LoRA model performs binary tasks only. Its confidence score is not converted into insult or bullying percentages. The scores for these three risk areas come from their respective models.
+The verified mapping used in the interface for the Hate model is:
+LABEL_0 = Neutral / Normal = Neutral / normal content
+LABEL_1 = Offensive = Offensive / derogatory content
+LABEL_2 = Hate = Hate speech
 
-### Kullanılan modeller
 
-| Görev | Model | Çıktı |
-| --- | --- | --- |
-| Genel toxicity | `Doruk2404/truthlens-toxic-lora` | `notoxic` veya `toxic` ve binary olasılık |
-| Hakaret | `nanelimon/bert-base-turkish-offensive` | Hakaret modelinin gerçek sınıf olasılıkları |
-| Zorbaca davranış | `nanelimon/bert-base-turkish-bullying` | Zorbalık alt sınıfları ve `Nötr` karşıtı toplam skor |
-| Nefret dili | `ctoraman/hate-speech-berturk` | `Neutral/Normal`, `Offensive`, `Hate` olasılıkları |
-| Claim reasoning | Gemini 3.5 Flash Lite | Claim çıkarımı ve final değerlendirme |
-| Evidence search | Tavily | Kaynak adayları ve URL’ler |
+2. Requirements
+Running the project requires the following:
+Requirement	Recommended Version
+Python	3.10 or higher
+Node.js	20 or higher
+npm	Included with Node.js
+Internet	Required for initial model downloads, Gemini, and Tavily
+Operating System	macOS, Linux, or Windows
+GPU	Optional; works with CPU, GPU recommended
+Upon first run, four Hugging Face models are downloaded. Total model size and CPU memory requirements vary by system. If Hugging Face access fails due to DNS or network issues, the backend honestly displays a fallback state and does not generate fake model scores.
+3
 
-Genel BERT+LoRA modeli yalnızca binary görev yapar. Genel modelin confidence değeri hakaret veya zorbalık yüzdesine dönüştürülmez. Bu üç risk alanının skorları kendi modellerinden gelir.
-
-Hate modeli için arayüzde kullanılan doğrulanmış mapping şöyledir:
-
-```
-LABEL_0 = Neutral / Normal = Nötr / normal içerik
-LABEL_1 = Offensive       = Saldırgan / aşağılayıcı içerik
-LABEL_2 = Hate            = Nefret söylemi
-```
-
----
-
-## 2. Gereksinimler
-
-Projeyi çalıştırmak için aşağıdakiler gerekir:
-
-| Gereksinim | Önerilen sürüm |
-| --- | --- |
-| Python | 3.10 veya üzeri |
-| Node.js | 20 veya üzeri |
-| npm | Node.js ile birlikte gelir |
-| İnternet | İlk model indirme, Gemini ve Tavily için gerekir |
-| İşletim sistemi | macOS, Linux veya Windows |
-| GPU | Zorunlu değil; CPU ile çalışır, GPU önerilir |
-
-İlk çalıştırmada dört Hugging Face modeli indirilir. Modellerin toplam boyutu ve CPU belleği sistemden sisteme değişebilir. Hugging Face erişimi DNS veya ağ nedeniyle başarısız olursa backend fallback durumunu dürüstçe gösterir; sahte model skoru üretmez.
-
----
-
-## 3. Proje klasör yapısı
-
-Kullanıcının proje klasörü şu yapıda olmalıdır:
-
-```
+. Project Folder Structure
+Your project folder should be structured as follows:
+Plaintext
 truthlens-ai/
 ├── backend/
 │   ├── main.py
 │   ├── requirements.txt
 │   ├── .env
 │   ├── .env.example
-│   ├── truthlens.db                 # Çalışırken oluşabilir
+│   ├── truthlens.db                 # Created during runtime
 │   └── test_*.py
 │
 └── frontend/
@@ -103,103 +78,74 @@ truthlens-ai/
     ├── package.json
     ├── package-lock.json
     └── tsconfig.json
-```
+If the files in your delivery package are in the same folder, move main.py and Python files into the backend folder, and app/, package.json, and Next.js files into the frontend folder. The .env file must reside in the same directory where main.py is executed.
 
-Bu teslim paketinde dosyalar aynı klasördeyse, `main.py` ve Python dosyalarını backend klasörüne; `app/`, `package.json` ve Next.js dosyalarını frontend klasörüne taşıyın. `main.py` hangi klasörde çalıştırılıyorsa `.env` de aynı klasörde bulunmalıdır.
 
----
+4. Where to Obtain API Keys
 
-## 4. API anahtarları nereden alınır?
 
-### 4.1 Google Gemini API anahtarı
+4.1 Google Gemini API Key
+Log in to your Google AI Studio account.
+Create a new key under the API key section.
+Write the key only to the backend .env file.
+Do not put this key into page.tsx, frontend .env, GitHub, or screenshots. TruthLens uses the Google Gemini API directly for claim extraction and final reasoning.
 
-1. [Google AI Studio](https://aistudio.google.com/) hesabınıza girin.
 
-1. API key bölümünden yeni bir anahtar oluşturun.
+4.2 Tavily API Key
+Open a Tavily account.
+Create an API key via the dashboard.
+Add the key to the backend .env as TAVILY_API_KEY.
+Tavily searches for source candidates for claims produced by Gemini. If no Tavily key is provided, the source chain may return empty or limited results, but toxicity analysis will still function.
 
-1. Anahtarı yalnızca **backend ****`.env`**** dosyasına** yazın.
 
-1. Anahtarı `page.tsx`, frontend `.env`, GitHub veya ekran görüntüsüne koymayın.
+4.3 Hugging Face Token
+If the model repositories are public, HF_TOKEN can be left blank. If using private repositories or encountering Hugging Face rate limits, create a token with Read permissions from Hugging Face Settings → Access Tokens.
+The token must be written only to the backend .env file and must not be exposed to the frontend.
 
-TruthLens claim extraction ve final reasoning için doğrudan Google Gemini API kullanır.
 
-### 4.2 Tavily API anahtarı
+4.4 Sightengine Credentials — Optional
+You can use user and secret details from your Sightengine account to analyze whether an image is AI-generated. If these details are missing, text, OCR, and other analyses will continue to function; only the Sightengine visual AI signal will be unavailable.
 
-1. [Tavily](https://tavily.com/) hesabı açın.
 
-1. Dashboard üzerinden API key oluşturun.
+4.5 Bluesky Credentials — Optional Demo
+If you want to use the Bluesky social demo flow:
+BLUESKY_HANDLE: Your Bluesky username.
+BLUESKY_APP_PASSWORD: Your Bluesky application password.
+These two variables are not mandatory for normal TruthLens text analysis. Do not use your real account password; create a Bluesky app password instead.
 
-1. Anahtarı backend `.env` içine `TAVILY_API_KEY` olarak ekleyin.
 
-Tavily, Gemini’nin ürettiği doğrulanabilir claim için kaynak adayı arar. Tavily anahtarı yoksa kaynak zinciri sınırlı veya boş dönebilir; toxicity analizi yine çalışabilir.
-
-### 4.3 Hugging Face token
-
-Model repository’leri public ise `HF_TOKEN` boş bırakılabilir. Hugging Face rate limit veya private repository kullanılıyorsa [Hugging Face Settings → Access Tokens](https://huggingface.co/settings/tokens) sayfasından Read yetkili token oluşturun.
-
-Token yalnızca backend `.env` dosyasına yazılmalıdır. Frontend’e aktarılmamalıdır.
-
-### 4.4 Sightengine bilgileri — isteğe bağlı
-
-Görselin yapay üretilmiş olma ihtimalini analiz etmek için [Sightengine](https://sightengine.com/) hesabındaki kullanıcı ve secret bilgilerini kullanabilirsiniz. Bu bilgiler yoksa metin, OCR ve diğer analizler çalışmaya devam eder; yalnızca Sightengine görsel AI sinyali kullanılamaz.
-
-### 4.5 Bluesky bilgileri — isteğe bağlı demo
-
-Bluesky sosyal demo akışını kullanacaksanız:
-
-- `BLUESKY_HANDLE`: Bluesky kullanıcı adınız.
-
-- `BLUESKY_APP_PASSWORD`: Bluesky uygulama parolası.
-
-Normal TruthLens metin analizi için bu iki değişken zorunlu değildir. Gerçek hesabınızın normal parolasını kullanmayın; Bluesky uygulama parolası oluşturun.
-
-### 4.6 Cohere ve NaraRouter
-
-Mevcut aktif `main.py` akışında `COHERE_API_KEY`, `NARAROUTER_API_KEY` ve `NARAROUTER_MODEL` kullanılmaz. Bu nedenle çalışma için gerekli değillerdir. Eski deneysel `cohere_web_test.py` veya `image_fix.py` dosyaları çalıştırılmadıkça bu anahtarları `.env` içinde tutmanız gerekmez.
-
-Önerilen yaklaşım:
-
-```
-# Silinebilir; aktif main.py tarafından kullanılmıyor
+4.6 Cohere and NaraRouter
+The active main.py flow does not use COHERE_API_KEY, NARAROUTER_API_KEY, or NARAROUTER_MODEL. Therefore, they are not required for operation. Unless running legacy experimental files like cohere_web_test.py or image_fix.py, you do not need to keep these keys in .env.
+Recommended approach:
+Code snippet
+# Removable; not used by the active main.py
 COHERE_API_KEY=
 NARAROUTER_API_KEY=
 NARAROUTER_MODEL=
-```
+If any of these values were previously used as real keys, revoke them from the respective service panel and generate new ones for security.
 
-Bu değerlerden herhangi biri daha önce gerçek anahtar olarak kullanıldıysa güvenlik için ilgili servis panelinden anahtarı iptal edip yenisini üretin.
 
----
-
-## 5. Backend `.env` dosyası
-
-Backend klasöründe `.env.example` dosyasını `.env` adıyla kopyalayın:
-
-### macOS / Linux
-
-```bash
+5. Backend .env File
+Copy .env.example to .env in the backend folder:
+macOS / Linux
+Bash
 cd backend
 cp .env.example .env
-```
-
-### Windows PowerShell
-
-```
+Windows PowerShell
+PowerShell
 cd backend
 Copy-Item .env.example .env
-```
-
-Sonra `.env` dosyasını açıp aşağıdaki alanları doldurun:
-
-```
-# Zorunlu: doğrudan Google Gemini API
-GOOGLE_API_KEY=BURAYA_GOOGLE_AI_STUDIO_ANAHTARI
+Open the .env file and populate the following fields:
+Code snippet
+# Mandatory: Direct Google Gemini API
+GOOGLE_API_KEY=YOUR_GOOGLE_AI_STUDIO_KEY
 GEMINI_MODEL=gemini-3.5-flash-lite
 GEMINI_API_BASE=https://generativelanguage.googleapis.com/v1beta
 
-# Önerilir: claim kanıtı için
-TAVILY_API_KEY=BURAYA_TAVILY_ANAHTARI
+# Recommended: For claim evidence
+TAVILY_API_KEY=YOUR_TAVILY_KEY
 
-# Hugging Face modelleri
+# Hugging Face Models
 TOXICITY_MODEL_ID=Doruk2404/truthlens-toxic-lora
 TOXICITY_BASE_MODEL=dbmdz/bert-base-turkish-cased
 INSULT_MODEL_ID=nanelimon/bert-base-turkish-offensive
@@ -209,47 +155,33 @@ HF_TOKEN=
 TOXICITY_MAX_LENGTH=256
 AUXILIARY_MODEL_MAX_LENGTH=256
 
-# İsteğe bağlı görsel AI analizi
+# Optional Visual AI Analysis
 SIGHTENGINE_API_USER=
 SIGHTENGINE_API_SECRET=
 
-# İsteğe bağlı Bluesky sosyal demo
+# Optional Bluesky Social Demo
 BLUESKY_HANDLE=
 BLUESKY_APP_PASSWORD=
 
-# Frontend geliştirme adreslerine izin verir
+# Allow frontend development addresses
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173
-```
+Hugging Face Cache Settings
+If you want to download models to a specific drive on macOS or Linux, add cache variables to your .env:
+Code snippet
+HF_HOME=/Users/your_username/hf-cache
+HF_HUB_CACHE=/Users/your_username/hf-cache/hub
+TRANSFORMERS_CACHE=/Users/your_username/hf-cache/transformers
+Windows Example:
+Code snippet
+HF_HOME=C:/Users/YourUsername/hf-cache
+HF_HUB_CACHE=C:/Users/YourUsername/hf-cache/hub
+TRANSFORMERS_CACHE=C:/Users/YourUsername/hf-cache/transformers
+Make sure the folder actually exists. Cache variables allow models to be downloaded from Hugging Face; initial downloads cannot occur without an internet connection. If models were previously downloaded to the cache, offline loading may be possible, provided the cache path used by the backend is correct.
+HF_HOME=/Users/dorukoz/hf-cache applies only to the user dorukoz on that machine. Do not copy this path verbatim onto another user's computer; use your own user directory.
 
-### Hugging Face cache ayarları
-
-macOS veya Linux’ta modelleri belirli bir diske indirmek isterseniz `.env` içine aşağıdaki gibi cache değişkenleri ekleyebilirsiniz:
-
-```
-HF_HOME=/Users/kullanici_adiniz/hf-cache
-HF_HUB_CACHE=/Users/kullanici_adiniz/hf-cache/hub
-TRANSFORMERS_CACHE=/Users/kullanici_adiniz/hf-cache/transformers
-```
-
-Windows örneği:
-
-```
-HF_HOME=C:/Users/KullaniciAdiniz/hf-cache
-HF_HUB_CACHE=C:/Users/KullaniciAdiniz/hf-cache/hub
-TRANSFORMERS_CACHE=C:/Users/KullaniciAdiniz/hf-cache/transformers
-```
-
-Klasörün gerçekten var olduğundan emin olun. Cache değişkenleri modelin Hugging Face’ten indirilmesini sağlar; internet bağlantısı olmadan ilk indirme yapılamaz. Modeller daha önce cache’e indirilmişse offline yükleme mümkün olabilir, ancak backend’in kullandığı cache yolunun doğru olması gerekir.
-
-> `HF_HOME=/Users/dorukoz/hf-cache` yalnızca o bilgisayardaki `/Users/dorukoz` kullanıcısı için geçerlidir. Başka bir kullanıcının bilgisayarında bu yolu aynen kullanmayın; kendi kullanıcı klasörünüzü yazın.
-
----
-
-## 6. `.gitignore` güvenliği
-
-Mevcut `.gitignore` fikren doğru, ancak `**pycache**/` yazımı doğru Python cache deseni değildir. Aşağıdaki sürümü kullanın:
-
-```
+6. .gitignore Security
+The existing .gitignore is conceptually correct, but __pycache__// is not a standard Python cache pattern. Use the following version:
+Plaintext
 # Secrets and local environment
 .env
 .env.*
@@ -295,339 +227,231 @@ Thumbs.db
 
 # Test artifacts
 raw_three_before.json
-```
+.env.example can be committed to Git; the real .env must never be committed. If you previously pushed API keys to Git, deleting the file is not enough; revoke the keys from the service panels and generate new ones.
+Production Deployment: Vercel + Render
+In this project, deploy the Next.js interface to Vercel and the FastAPI backend to a separate continuously running service on Render.
+The render.yaml file disables PyTorch toxicity models by default to prevent OOM (Out Of Memory) crashes on 512 MiB RAM instances; in this setup, toxicity analysis uses a controlled fallback and does not generate model scores. To enable all four models, set TOXICITY_MODELS_ENABLED=true and use an instance with at least 4 GB of RAM. The backend must run with a single worker.
+Import the GitHub repository into Vercel. Select frontend as the Root Directory; Next.js will be detected automatically.
+Add NEXT_PUBLIC_API_BASE_URL under the Vercel project's Settings → Environment Variables. The value should be your Render API service URL, e.g., [https://truthlens-api.onrender.com](https://truthlens-api.onrender.com). Then redeploy on Vercel.
+In Render, select New → Blueprint and choose the same GitHub repository. Render will create the truthlens-api service from the render.yaml file located at the root. When prompted, enter GOOGLE_API_KEY and TAVILY_API_KEY into the Render environment variables. HF_TOKEN is not required for public Hugging Face models; add it as a Render backend environment variable if dealing with rate limits or private models.
+Add your exact Vercel frontend origin to the ALLOWED_ORIGINS variable in Render, e.g., [https://truthlens-ai.vercel.app](https://truthlens-ai.vercel.app) (without a trailing /). If using preview deployments, add them separated by commas as well. Redeploy the Render service.
+Open https://<render-service-name>[.onrender.com/health](https://.onrender.com/health). You should receive an API health response; then try running an analysis from the Vercel frontend.
+Toxicity models are disabled in the Render Blueprint by default; when enabled, they are downloaded from Hugging Face on first boot, which takes time for the service to become ready. Upgrade the Render instance RAM before enabling model usage. SQLite and Render persistent disks are intended for a single instance; do not scale horizontally or spin up multiple backend instances. Place API keys in the Render backend environment variables, not on Vercel.
 
-`.env.example` Git’e eklenebilir; gerçek `.env` kesinlikle eklenmemelidir. API anahtarlarını daha önce Git’e gönderdiyseniz yalnızca dosyayı silmek yeterli değildir; anahtarları servis panellerinden iptal edip yenilerini üretin.
 
----
+7. macOS Installation and Execution
+The following steps are for macOS. Open your Terminal app. If you named your project folder differently, replace truthlens-ai with your folder name.
 
-## Üretime dağıtım: Vercel + Render
 
-Bu projede Next.js arayüzünü Vercel'e, FastAPI backend'ini ise sürekli çalışan ayrı bir servise dağıtın. `render.yaml`, 512 MiB bellekli instance'larda açılışın OOM ile kapanmaması için PyTorch toxicity modellerini varsayılan olarak devre dışı bırakır; bu durumda toksisite analizi kontrollü fallback kullanır ve model skorları üretmez. Dört modeli etkinleştirmek için `TOXICITY_MODELS_ENABLED=true` ayarlayın ve en az 4 GB RAM sağlayan bir instance kullanın. Backend tek worker ile çalışmalıdır.
-
-1. GitHub deposunu Vercel'e import edin. **Root Directory** olarak `frontend` seçin; Next.js otomatik algılanır.
-2. Vercel projesinin **Settings → Environment Variables** bölümüne `NEXT_PUBLIC_API_BASE_URL` ekleyin. Değer, Render API servis URL'si olmalı; örneğin `https://truthlens-api.onrender.com`. Sonra Vercel'de yeniden deploy edin.
-3. Render'da **New → Blueprint** ile aynı GitHub deposunu seçin. Render kökteki `render.yaml` dosyasından `truthlens-api` servisini oluşturur. İstendiğinde `GOOGLE_API_KEY` ve `TAVILY_API_KEY` değerlerini Render ortam değişkenlerine girin. Public Hugging Face modelleri için `HF_TOKEN` gerekmez; rate limit/private model durumunda Render backend ortam değişkeni olarak ayrıca ekleyin.
-4. Vercel'in verdiği tam frontend origin'ini Render'daki `ALLOWED_ORIGINS` değişkenine yazın; örneğin `https://truthlens-ai.vercel.app` (sonunda `/` olmadan). Preview deployment kullanacaksanız onu da virgülle ayırarak ekleyin. Render servisini yeniden deploy edin.
-5. `https://<render-servis-adı>.onrender.com/health` adresini açın. API sağlık yanıtı dönmeli; ardından Vercel frontend'inden analiz deneyin.
-
-Render Blueprint'te toxicity modelleri kapalıdır; modeller etkinleştirildiğinde ilk açılışta Hugging Face'ten indirilir ve servis hazır hale gelmesi zaman alır. Model kullanımını açmadan önce Render instance RAM'ini yükseltin. SQLite ve Render kalıcı diski tek instance içindir; yatay ölçekleme veya birden fazla backend instance'ı açmayın. API anahtarlarını Vercel'e değil, Render backend ortam değişkenlerine koyun.
-
-### macOS kurulumu ve çalıştırma
-
-Aşağıdaki adımlar macOS içindir. Terminal uygulamasını açın. Proje klasörünüzün adını farklı verdiyseniz `truthlens-ai` yerine kendi klasör adınızı yazın.
-
-### 7.1. Ön kontroller
-
-```bash
+7.1 Pre-checks
+Bash
 python3 --version
 node --version
 npm --version
-```
+Python 3.10+ and Node.js 20+ are recommended. If Node.js is not installed, install the LTS version from nodejs.org.
 
-Python 3.10 veya üzeri ve Node.js 20 veya üzeri önerilir. Node.js kurulu değilse [nodejs.org](https://nodejs.org/) üzerinden LTS sürümünü kurun.
 
-### 7.2. Backend klasörüne girin ve sanal ortam oluşturun
-
-```bash
+7.2 Enter Backend Folder and Create Virtual Environment
+Bash
 cd ~/truthlens-ai/backend
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-Terminal satırının başında `(.venv)` görürseniz sanal ortam aktiftir. Her yeni backend terminalinde önce şu komutu tekrar çalıştırmanız gerekir:
-
-```bash
+If you see (.venv) at the beginning of your terminal prompt, the virtual environment is active. For every new backend terminal window, you must run this command first:
+Bash
 source .venv/bin/activate
-```
 
-### 7.3. Python bağımlılıklarını kurun
 
-```bash
+7.3 Install Python Dependencies
+Bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-```
-
-İlk kurulumda PyTorch, Transformers, PEFT, Hugging Face Hub, Tesseract/Pillow ve FastAPI bağımlılıkları yüklenir. OCR için sistemde Tesseract yoksa Homebrew ile kurabilirsiniz:
-
-```bash
+The initial installation installs PyTorch, Transformers, PEFT, Hugging Face Hub, Tesseract/Pillow, and FastAPI dependencies. If Tesseract is missing on your system for OCR, you can install it via Homebrew:
+Bash
 brew install tesseract
-```
 
-### 7.4. Backend `.env` dosyasını oluşturun
 
-```bash
+7.4 Create Backend .env File
+Bash
 cp .env.example .env
 open -e .env
-```
+Verify at least GOOGLE_API_KEY, GEMINI_MODEL, TAVILY_API_KEY, and the Hugging Face model IDs inside .env. Write real keys only to this backend .env file.
+On Apple Silicon Macs, models can run on the CPU. Initial model downloads require sufficient disk space and an internet connection.
 
-`.env` içinde en azından `GOOGLE_API_KEY`, `GEMINI_MODEL`, `TAVILY_API_KEY` ve Hugging Face model ID’lerini kontrol edin. Gerçek anahtarları yalnızca bu backend `.env` dosyasına yazın.
 
-Apple Silicon Mac’lerde modeller CPU’da çalışabilir. İlk model indirme sırasında yeterli disk alanı ve internet bağlantısı gerekir.
-
-### 7.5. Hugging Face cache yolunu macOS’a göre ayarlayın
-
-Örneğin kendi kullanıcı adınız `dorukoz` ise:
-
-```
+7.5 Set Hugging Face Cache Path for macOS
+For example, if your username is dorukoz:
+Code snippet
 HF_HOME=/Users/dorukoz/hf-cache
 HF_HUB_CACHE=/Users/dorukoz/hf-cache/hub
 TRANSFORMERS_CACHE=/Users/dorukoz/hf-cache/transformers
-```
-
-Başka bir kullanıcıdaysanız `dorukoz` yerine kendi macOS kullanıcı adınızı yazın. Bu klasörleri oluşturmak için:
-
-```bash
+If you are under a different username, replace dorukoz with your own macOS username. To create these folders:
+Bash
 mkdir -p "$HOME/hf-cache/hub" "$HOME/hf-cache/transformers"
-```
 
-### 7.6. Backend’i başlatın — Terminal 1
 
-```bash
+7.6 Start the Backend — Terminal 1
+Bash
 cd ~/truthlens-ai/backend
 source .venv/bin/activate
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-```
+Leave this terminal open. Once the backend is ready, open these addresses:
+[http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-Bu terminali açık bırakın. Backend hazır olduktan sonra şu adresleri açın:
 
-- [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
-
-- [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-
-### 7.7. Frontend’i başlatın — Terminal 2
-
-Yeni bir Terminal penceresi açın; backend terminalini kapatmayın.
-
-```bash
+7.7 Start the Frontend — Terminal 2
+Open a new Terminal window; do not close the backend terminal.
+Bash
 cd ~/truthlens-ai/frontend
 npm ci
-```
-
-Frontend backend’i varsayılan olarak `http://127.0.0.1:8000` adresinde arar. Backend adresi farklıysa:
-
-```bash
+The frontend expects the backend at [http://127.0.0.1:8000](http://127.0.0.1:8000) by default. If your backend address differs:
+Bash
 printf 'NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000\n' > .env.local
-```
-
-Ardından frontend’i başlatın:
-
-```bash
+Then start the frontend:
+Bash
 npm run dev
-```
+Open http://localhost:3000 in your browser.
 
-Tarayıcıda [http://localhost:3000](http://localhost:3000) adresini açın.
 
-### 7.8. macOS için backend sağlık kontrolü
-
-Yeni bir terminalde veya ikinci terminalde:
-
-```bash
+7.8 macOS Backend Health Check
+In a new or second terminal:
+Bash
 curl http://127.0.0.1:8000/health
-```
+You should see google_gemini_configured: true and available: true for all four models. If there is a Hugging Face DNS or download issue, the respective model will show available: false; the frontend will display this as Model unavailable and will not generate fake scores.
 
-`google_gemini_configured: true` ve dört model için `available: true` görmeniz beklenir. Hugging Face DNS veya indirme sorunu varsa ilgili model `available: false` olur; frontend bunu `Model kullanılamadı` olarak gösterir ve sahte skor üretmez.
 
----
+8. Windows Installation and Execution
+The following steps are for Windows 10/11 and PowerShell. Open PowerShell. If you named your project folder differently, replace truthlens-ai with your folder name.
 
-## 8. Windows kurulumu ve çalıştırma
 
-Aşağıdaki adımlar Windows 10/11 ve **PowerShell** içindir. PowerShell’i açın. Proje klasörünüzün adını farklı verdiyseniz `truthlens-ai` yerine kendi klasör adınızı yazın.
-
-### 8.1. Ön kontroller
-
-```
+8.1 Pre-checks
+PowerShell
 py --version
 node --version
 npm --version
-```
+Python 3.10+ and Node.js 20+ are recommended. Install Python from python.org and Node.js LTS from nodejs.org. Check the Add Python to PATH option during Python installation.
 
-Python 3.10 veya üzeri ve Node.js 20 veya üzeri önerilir. Python için [python.org](https://www.python.org/downloads/windows/) ve Node.js için [nodejs.org](https://nodejs.org/) LTS sürümünü kurun. Python kurulumunda **Add Python to PATH** seçeneğini işaretleyin.
 
-### 8.2. Backend klasörüne girin ve sanal ortam oluşturun
-
-```
+8.2 Enter Backend Folder and Create Virtual Environment
+PowerShell
 cd $HOME\truthlens-ai\backend
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-Terminal satırının başında `(.venv)` görürseniz sanal ortam aktiftir. Her yeni backend PowerShell penceresinde önce şu komutu tekrar çalıştırmanız gerekir:
-
-```
+If you see (.venv) at the beginning of your terminal prompt, the virtual environment is active. For every new PowerShell window, you must run this command first:
+PowerShell
 .\.venv\Scripts\Activate.ps1
-```
-
-Eğer PowerShell script çalıştırma politikası hatası verirse yalnızca mevcut kullanıcı için şu komutu çalıştırın:
-
-```
+If PowerShell throws a script execution policy error, run this command for the current user only:
+PowerShell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
+Then run the activation command again.
 
-Sonra aktivasyon komutunu tekrar çalıştırın.
 
-### 8.3. Python bağımlılıklarını kurun
-
-```
+8.3 Install Python Dependencies
+PowerShell
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-```
+Initial installation pulls PyTorch, Transformers, PEFT, Hugging Face Hub, Tesseract/Pillow, and FastAPI dependencies. You may need to install Tesseract on Windows for OCR and ensure Tesseract is added to your PATH.
 
-İlk kurulumda PyTorch, Transformers, PEFT, Hugging Face Hub, Tesseract/Pillow ve FastAPI bağımlılıkları yüklenir. OCR için Windows’a Tesseract kurmanız gerekebilir. Kurulumdan sonra Tesseract’ın PATH’e eklendiğinden emin olun.
 
-### 8.4. Backend `.env` dosyasını oluşturun
-
-```
+8.4 Create Backend .env File
+PowerShell
 Copy-Item .env.example .env
 notepad .env
-```
+Verify at least GOOGLE_API_KEY, GEMINI_MODEL, TAVILY_API_KEY, and Hugging Face model IDs inside .env. Write real keys only to the backend .env file.
 
-`.env` içinde en azından `GOOGLE_API_KEY`, `GEMINI_MODEL`, `TAVILY_API_KEY` ve Hugging Face model ID’lerini kontrol edin. Gerçek anahtarları yalnızca backend `.env` dosyasına yazın.
 
-### 8.5. Hugging Face cache yolunu Windows’a göre ayarlayın
-
-Örneğin Windows kullanıcı adınız `Doruk` ise:
-
-```
+8.5 Set Hugging Face Cache Path for Windows
+For example, if your Windows username is Doruk:
+Code snippet
 HF_HOME=C:/Users/Doruk/hf-cache
 HF_HUB_CACHE=C:/Users/Doruk/hf-cache/hub
 TRANSFORMERS_CACHE=C:/Users/Doruk/hf-cache/transformers
-```
-
-Alternatif olarak PowerShell’de cache değişkenlerini geçici olarak tanımlayabilirsiniz:
-
-```
+Alternatively, define cache variables temporarily in PowerShell:
+PowerShell
 $env:HF_HOME="$HOME\hf-cache"
 $env:HF_HUB_CACHE="$HOME\hf-cache\hub"
 $env:TRANSFORMERS_CACHE="$HOME\hf-cache\transformers"
 New-Item -ItemType Directory -Force "$HOME\hf-cache\hub" | Out-Null
 New-Item -ItemType Directory -Force "$HOME\hf-cache\transformers" | Out-Null
-```
 
-### 8.6. Backend’i başlatın — PowerShell Terminal 1
 
-```
+8.6 Start the Backend — PowerShell Terminal 1
+PowerShell
 cd $HOME\truthlens-ai\backend
 .\.venv\Scripts\Activate.ps1
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-```
+Leave this window open. Once ready, visit:
+[http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-Bu pencereyi açık bırakın. Backend hazır olduktan sonra şu adresleri açın:
 
-- [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
-
-- [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-
-### 8.7. Frontend’i başlatın — PowerShell Terminal 2
-
-Yeni bir PowerShell penceresi açın; backend penceresini kapatmayın.
-
-```
+8.7 Start the Frontend — PowerShell Terminal 2
+Open a new PowerShell window; do not close the backend window.
+PowerShell
 cd $HOME\truthlens-ai\frontend
 npm ci
-```
-
-Frontend backend’i varsayılan olarak `http://127.0.0.1:8000` adresinde arar. Backend adresi farklıysa:
-
-```
+If your backend address differs from the default [http://127.0.0.1:8000](http://127.0.0.1:8000):
+PowerShell
 Set-Content -Path .env.local -Value "NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000"
-```
-
-Ardından frontend’i başlatın:
-
-```
+Then start the frontend:
+PowerShell
 npm run dev
-```
+Open http://localhost:3000 in your browser.
 
-Tarayıcıda [http://localhost:3000](http://localhost:3000) adresini açın.
 
-### 8.8. Windows için backend sağlık kontrolü
-
-PowerShell’de:
-
-```
+8.8 Windows Backend Health Check
+In PowerShell:
+PowerShell
 Invoke-RestMethod http://127.0.0.1:8000/health | ConvertTo-Json -Depth 10
-```
+Expect google_gemini_configured: true and available: true for all four models. If a Hugging Face DNS or download error occurs, the model becomes available: false; the frontend displays Model unavailable without generating fake scores.
 
-`google_gemini_configured: true` ve dört model için `available: true` görmeniz beklenir. Hugging Face DNS veya indirme sorunu varsa ilgili model `available: false` olur; frontend bunu `Model kullanılamadı` olarak gösterir ve sahte skor üretmez.
 
-### 8.9. Windows’ta iki terminalin kısa özeti
-
-**PowerShell Terminal 1 — backend:**
-
-```
+8.9 Summary of Two Terminals on Windows
+PowerShell Terminal 1 — Backend:
+PowerShell
 cd $HOME\truthlens-ai\backend
 .\.venv\Scripts\Activate.ps1
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-**PowerShell Terminal 2 — frontend:**
-
-```
+PowerShell Terminal 2 — Frontend:
+PowerShell
 cd $HOME\truthlens-ai\frontend
 npm ci
 npm run dev
-```
 
----
 
-## 9. İlk analiz nasıl yapılır?
+9. Making Your First Analysis
+Check the backend /health status.
+Open the frontend at http://localhost:3000.
+Type a sample text into the input field, e.g., "Sen tam bir aptalsın." (You are a total idiot).
+Click the Analyze button.
+Review the general toxicity engine results and model confidence on the results screen.
+Check individual results for insult, bullying, and the hate model on the contextual toxicity card.
+Inspect the claim, supporting/contradicting sources, and Tavily status for any verifiable sentence.
+The hate model results are displayed in the interface with these meanings:
+Nötr / normal içerik (Neutral / normal content)
+Saldırgan / aşağılayıcı içerik (Offensive / derogatory content)
+Nefret söylemi (Hate speech)
+If a model is unavailable, the interface must display Model unavailable. This is not the same as a genuine 0%.
 
-1. Backend’in `/health` durumunu kontrol edin.
 
-1. Frontend’i `http://localhost:3000` adresinden açın.
-
-1. Metin alanına örneğin `Sen tam bir aptalsın.` yazın.
-
-1. **Analiz Et** düğmesine basın.
-
-1. Sonuç ekranında genel toxicity engine’ini ve model confidence’ını kontrol edin.
-
-1. Bağlamsal toksisite kartında hakaret, zorbalık ve hate modelinin ayrı sonuçlarını kontrol edin.
-
-1. Doğrulanabilir bir cümlede claim, supporting/contradicting kaynaklar ve Tavily durumunu inceleyin.
-
-Hate modelinin sonuçları arayüzde şu anlamlarla gösterilir:
-
-```
-Nötr / normal içerik
-Saldırgan / aşağılayıcı içerik
-Nefret söylemi
-```
-
-Model kullanılamıyorsa arayüzde **Model kullanılamadı** gösterilmelidir. Bu, gerçek `%0` ile aynı şey değildir.
-
----
-
-## 10. API örnekleri
-
-### Metin analizi
-
-```bash
+10. API Examples
+Text Analysis
+Bash
 curl -X POST http://127.0.0.1:8000/analyze \
   -H "Content-Type: application/json" \
   -d '{"content":"Sen tam bir aptalsın."}'
-```
-
-`text` alanı da geriye dönük uyumluluk için kabul edilir:
-
-```bash
+The text field is also accepted for backward compatibility:
+Bash
 curl -X POST http://127.0.0.1:8000/analyze \
   -H "Content-Type: application/json" \
   -d '{"text":"Bugün hava çok güzel."}'
-```
-
-### URL analizi
-
-```bash
+URL Analysis
+Bash
 curl -X POST http://127.0.0.1:8000/analyze-url \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
-```
-
-### Önemli response alanları
-
-```json
+Important Response Fields
+JSON
 {
   "toxicity_label": "toxic",
   "toxicity_confidence": 0.9994,
@@ -655,17 +479,12 @@ curl -X POST http://127.0.0.1:8000/analyze-url \
   "pipeline_status": {},
   "moderation": {}
 }
-```
+Percentages are for illustrative purposes. Actual results vary based on each text and model inference.
 
-Yüzdeler örnek amaçlıdır. Gerçek sonuç her metin ve model inference’ına göre değişir.
 
----
-
-## 11. Testler
-
-Backend sanal ortamı aktifken:
-
-```bash
+11. Tests
+With the backend virtual environment active:
+Bash
 python -m py_compile main.py
 python test_moderation_logic.py
 python test_toxicity.py
@@ -673,144 +492,86 @@ python test_binary_toxicity_mapping.py
 python test_multi_model_runtime.py
 python test_analyze_raw_three.py
 python test_hybrid_pipeline.py
-```
-
-Frontend production build testi:
-
-```bash
+Frontend production build test:
+Bash
 cd ../frontend
 npm ci
 npm run build
-```
+Real Hugging Face model tests require internet access and sufficient RAM. If models are not cached, they will be downloaded on first run. If there is no network/DNS, available=false is the expected outcome; the purpose of the test in this case is to verify that the fallback behavior does not produce fake scores.
 
-Gerçek Hugging Face model testi internet ve yeterli RAM gerektirir. Model cache’te değilse ilk çalıştırmada indirme yapılır. Ağ/DNS yoksa `available=false` beklenen sonuçtur; bu durumda testin amacı fallback davranışının sahte skor üretmediğini doğrulamaktır.
 
----
-
-## 12. Yaygın sorunlar ve çözümleri
-
-### `Fallback (model unavailable )` görünüyor
-
-Önce `/health` adresini açın. Dört modelden biri `available=false` ise `error` alanını okuyun. En yaygın nedenler Hugging Face DNS erişimi, ilk model indirme bağlantısının kesilmesi, yetersiz RAM/disk veya yanlış cache yoludur.
-
-### Gemini çalışmıyor
-
-`.env` içinde `GOOGLE_API_KEY` değerinin gerçek ve aktif olduğunu, `GEMINI_MODEL=gemini-3.5-flash-lite` satırının bulunduğunu kontrol edin. `.env` değiştikten sonra backend’i tamamen yeniden başlatın.
-
-### Kaynaklar boş
-
-`TAVILY_API_KEY` eksikse veya claim çıkarılamazsa Tavily evidence adımı boş kalabilir. `/analyze` response içindeki `pipeline_status` alanında `gemini_claim_extraction`, `tavily` ve `gemini_final_reasoning` durumlarını kontrol edin.
-
-### Frontend backend’e bağlanamıyor
-
-Backend’in gerçekten `127.0.0.1:8000` üzerinde çalıştığını kontrol edin. Farklı port kullanıyorsanız frontend `.env.local` içine `NEXT_PUBLIC_API_BASE_URL` yazıp frontend’i yeniden başlatın.
-
-### `422 Unprocessable Entity` alınıyor
-
-İstek gövdesinde `content` veya `text` alanlarından en az biri bulunmalıdır:
-
-```json
-{"content":"Analiz edilecek metin"}
-```
-
-### Hugging Face DNS hatası
-
-Önce interneti ve DNS’i kontrol edin. Modeller daha önce indirildiyse `.env` içindeki `HF_HOME`, `HF_HUB_CACHE` ve `TRANSFORMERS_CACHE` yollarının aynı kullanıcı ve aynı backend ortamı için doğru olduğundan emin olun. Cache yoksa modeller internet erişimli bir ortamda indirilmeden tamamen offline çalıştırılamaz.
-
-### Port zaten kullanılıyor
-
-```bash
+12. Troubleshooting and Common Issues
+Fallback (model unavailable) Appears
+First, open /health. If one of the four models shows available=false, read the error field. Common causes include Hugging Face DNS access issues, interrupted initial model downloads, insufficient RAM/disk space, or incorrect cache paths.
+Gemini Is Not Working
+Verify that GOOGLE_API_KEY in .env is real and active, and that the line GEMINI_MODEL=gemini-3.5-flash-lite is present. Completely restart the backend after modifying .env.
+Sources Are Empty
+If TAVILY_API_KEY is missing or if claims cannot be extracted, the Tavily evidence step may remain empty. Check the status of gemini_claim_extraction, tavily, and gemini_final_reasoning within the pipeline_status field inside the /analyze response.
+Frontend Cannot Connect to Backend
+Verify that the backend is actually running on 127.0.0.1:8000. If using a different port, write NEXT_PUBLIC_API_BASE_URL into frontend .env.local and restart the frontend.
+Receiving 422 Unprocessable Entity
+The request body must contain at least one of the content or text fields:
+JSON
+{"content":"Text to be analyzed"}
+Hugging Face DNS Error
+Check your internet connection and DNS settings. If models were previously downloaded, make sure the paths in HF_HOME, HF_HUB_CACHE, and TRANSFORMERS_CACHE match the same user and backend environment. Without cache, models cannot run entirely offline without being downloaded in an internet-connected environment first.
+Port Already in Use (macOS/Linux)
+Bash
 lsof -i :8000
 kill -9 PID
-```
-
 Windows PowerShell:
-
-```
+PowerShell
 netstat -ano | findstr :8000
 taskkill /PID PID /F
-```
 
----
 
-## 13. Güvenlik kontrol listesi
+13. Security Checklist
+Keep real API keys inside .env.
+Do not commit the .env file to Git.
+Do not expose GOOGLE_API_KEY, TAVILY_API_KEY, HF_TOKEN, Sightengine secret, and Bluesky app password values to the frontend.
+If a real key enters Git, revoke it from the panel and generate a new one.
+Use a Bluesky app password, not your normal account password.
+In production environments, restrict ALLOWED_ORIGINS strictly to your actual frontend domain.
+Do not add the Hugging Face model cache or truthlens.db to public repositories.
 
-- Gerçek API anahtarlarını `.env` içinde tutun.
 
-- `.env` dosyasını Git’e göndermeyin.
+14. Social / Bluesky Demo
+The social demo screen of TruthLens illustrates the platform adapter pattern. If BLUESKY_HANDLE and BLUESKY_APP_PASSWORD are defined, the Bluesky feed and social actions can operate. The NSosyal integration is demonstrated through a prototype adapter/simulation contract; platform permissions, API contracts, and human approval flows must be separately verified before executing sharing, deletion, or punishment actions on a real production account.
+The goal of DiyalogKalkanı is not automated deletion, but providing explainable and reversible decision support to the moderator.
 
-- `GOOGLE_API_KEY`, `TAVILY_API_KEY`, `HF_TOKEN`, Sightengine secret ve Bluesky app password değerlerini frontend’e koymayın.
 
-- Gerçek anahtar Git’e girdiyse panelden iptal edip yenisini üretin.
+15. Pre-production Checklist
+[ ] .env created and real keys stored only in the backend
+[ ] NaraRouter/Cohere legacy keys removed from active config
+[ ] Backend requirements installed
+[ ] /health endpoint accessible
+[ ] available status of all four Hugging Face models verified
+[ ] Gemini configured/success status verified
+[ ] Tavily evidence test executed
+[ ] Frontend opened on localhost:3000
+[ ] Three sample texts analyzed
+[ ] npm run build successful
+[ ] Real .env not committed to Git
+[ ] API keys do not appear in README or screenshots
 
-- Bluesky normal hesabınızın parolasını değil app password kullanın.
 
-- Üretim ortamında `ALLOWED_ORIGINS` değerini yalnızca gerçek frontend domainiyle sınırlandırın.
+16. License and Responsible Use
+TruthLens AI is a moderation decision-support prototype. Because model results are probabilistic, they should not be used alone for irreversible legal, punitive, or account-impacting decisions. Human review, appeals, and audit logs must be maintained for medium and high-risk outcomes.
+Licensing terms of open-source models and libraries used must also be reviewed, and conditions outlined in their respective model cards must be adhered to during distribution.
 
-- Hugging Face model cache’ini ve `truthlens.db` dosyasını public repository’ye eklemeyin.
 
----
-
-## 14. NSosyal / Bluesky demo
-
-TruthLens’in sosyal demo ekranı platform adapter mantığını gösterir. `BLUESKY_HANDLE` ve `BLUESKY_APP_PASSWORD` tanımlıysa Bluesky feed ve sosyal aksiyonlar çalışabilir. NSosyal entegrasyonu prototipte adapter/simülasyon sözleşmesiyle gösterilir; gerçek üretim hesabında paylaşım, silme veya cezalandırma işlemi yapmadan önce platform izinleri, API sözleşmesi ve insan onayı akışı ayrıca doğrulanmalıdır.
-
-DiyalogKalkanı’nın amacı otomatik silme değil; moderatöre açıklanabilir ve geri döndürülebilir karar desteği sunmaktır.
-
----
-
-## 15. Üretim öncesi kontrol
-
-```
-[ ] .env oluşturuldu ve gerçek anahtarlar yalnızca backend’de tutuluyor
-[ ] NaraRouter/Cohere eski anahtarları aktif config’ten kaldırıldı
-[ ] Backend requirements kuruldu
-[ ] /health açılıyor
-[ ] Dört Hugging Face modelinin available durumu kontrol edildi
-[ ] Gemini configured/success durumu kontrol edildi
-[ ] Tavily evidence testi yapıldı
-[ ] Frontend localhost:3000 üzerinde açıldı
-[ ] Üç örnek metin analiz edildi
-[ ] npm run build başarılı
-[ ] Gerçek .env Git’e girmiyor
-[ ] API anahtarları README veya ekran görüntüsünde görünmüyor
-```
-
----
-
-## 16. Lisans ve sorumlu kullanım
-
-TruthLens AI bir moderasyon karar destek prototipidir. Model sonuçları olasılıksal olduğundan tek başına hukuki, cezai veya kullanıcı hesabını etkileyen geri döndürülemez kararlar için kullanılmamalıdır. Orta ve yüksek riskli sonuçlarda insan incelemesi, itiraz ve denetim kaydı korunmalıdır.
-
-Kullanılan açık kaynak model ve kütüphanelerin lisans koşulları ayrıca incelenmeli ve dağıtım sırasında ilgili model kartlarındaki şartlara uyulmalıdır.
-
----
-
-## 17. Kaynaklar
-
-1. [Google Gemini API Documentation](https://ai.google.dev/gemini-api/docs)
-
-1. [Tavily Documentation](https://docs.tavily.com/)
-
-1. [Hugging Face — Doruk2404/truthlens-toxic-lora](https://huggingface.co/Doruk2404/truthlens-toxic-lora)
-
-1. [Hugging Face — nanelimon/bert-base-turkish-offensive](https://huggingface.co/nanelimon/bert-base-turkish-offensive)
-
-1. [Hugging Face — nanelimon/bert-base-turkish-bullying](https://huggingface.co/nanelimon/bert-base-turkish-bullying)
-
-1. [Hugging Face — ctoraman/hate-speech-berturk](https://huggingface.co/ctoraman/hate-speech-berturk)
-
-1. [FastAPI Documentation](https://fastapi.tiangolo.com/)
-
-1. [Next.js Documentation](https://nextjs.org/docs)
-
-1. [Bluesky AT Protocol Documentation](https://docs.bsky.app/)
-
----
-
-## En kısa çalıştırma özeti
-
-```bash
+17. References
+Google Gemini API Documentation
+Tavily Documentation
+Hugging Face — Doruk2404/truthlens-toxic-lora
+Hugging Face — nanelimon/bert-base-turkish-offensive
+Hugging Face — nanelimon/bert-base-turkish-bullying
+Hugging Face — ctoraman/hate-speech-berturk
+FastAPI Documentation
+Next.js Documentation
+Bluesky AT Protocol Documentation
+Quickest Execution Summary
+Bash
 # Terminal 1
 cd truthlens-ai/backend
 python3 -m venv .venv
@@ -823,8 +584,6 @@ cd truthlens-ai/frontend
 npm ci
 npm run dev
 
-# Tarayıcı
+# Browser
 open http://localhost:3000
-```
-
-Windows’ta `source .venv/bin/activate` yerine `.\.venv\Scripts\Activate.ps1` kullanın.
+On Windows, use .\.venv\Scripts\Activate.ps1 instead of source .venv/bin/activate.
